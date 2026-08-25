@@ -304,7 +304,7 @@ object BiliSymbolResolver {
             scanHomeTopBar(classLoader)
         }
         val bottomBar = scanHookPoint(HP_BOTTOM_BAR, hookPoints, scanErrors, log) {
-            scanBottomBar(classLoader)
+            scanBottomBar(classLoader, ::bridge)
         }
         val homeRecommendFeed = scanHookPoint(HP_HOME_RECOMMEND_FEED, hookPoints, scanErrors, log) {
             scanHomeRecommendFeed(classLoader)
@@ -2264,7 +2264,7 @@ object BiliSymbolResolver {
                 it.parameterTypes.contentEquals(arrayOf(Menu::class.java, MenuInflater::class.java))
         }?.apply { isAccessible = true }
 
-        val baseFragmentClass = classLoader.loadClassOrNull(HOME_BASE_MAIN_FRAME_FRAGMENT)
+        val baseFragmentClass = HOME_BASE_MAIN_FRAME_FRAGMENTS.firstNotNullOfOrNull(classLoader::loadClassOrNull)
         val baseOnViewCreated = baseFragmentClass?.declaredMethods?.firstOrNull {
             it.name == "onViewCreated" &&
                 it.parameterTypes.contentEquals(arrayOf(View::class.java, Bundle::class.java))
@@ -2311,8 +2311,12 @@ object BiliSymbolResolver {
 
     private fun scanBottomBar(
         classLoader: ClassLoader,
+        bridge: () -> DexKitBridge?,
     ): SymbolScanResult<BottomBarSymbols> {
-        val tabHostClasses = BOTTOM_TAB_HOST_CLASSES.mapNotNull(classLoader::loadClassOrNull)
+        val tabHostClasses = buildSet {
+            addAll(BOTTOM_TAB_HOST_CLASSES.mapNotNull(classLoader::loadClassOrNull))
+            addAll(findClassNamesBySimpleName(bridge, "TabHost").mapNotNull(classLoader::loadClassOrNull))
+        }
         val tabHostSetTabsMethods = tabHostClasses
             .asSequence()
             .flatMap { it.allMethods() }
@@ -2334,18 +2338,19 @@ object BiliSymbolResolver {
             }
             .distinctBy(Method::toGenericString)
             .toList()
-        val baseOnViewCreatedMethods = classLoader.loadClassOrNull(HOME_BASE_MAIN_FRAME_FRAGMENT)
-            ?.allMethods()
-            ?.filter { method ->
+        val baseOnViewCreatedMethods = HOME_BASE_MAIN_FRAME_FRAGMENTS
+            .asSequence()
+            .mapNotNull(classLoader::loadClassOrNull)
+            .flatMap { it.allMethods() }
+            .filter { method ->
                 method.name == "onViewCreated" &&
                     method.parameterCount == 2 &&
                     method.parameterTypes[0] == View::class.java &&
                     method.parameterTypes[1] == Bundle::class.java &&
                     method.returnType == Void.TYPE
             }
-            ?.distinctBy(Method::toGenericString)
-            ?.toList()
-            .orEmpty()
+            .distinctBy(Method::toGenericString)
+            .toList()
 
         if (tabHostSetTabsMethods.isEmpty() || tabHostGetTabsMethods.isEmpty()) {
             return SymbolScanResult.Missing("bottom bar hook points not found")
@@ -4169,11 +4174,19 @@ object BiliSymbolResolver {
     )
     private const val GEMINI_SIMPLE_VIEW_ENTRY = "com.bilibili.app.gemini.ui.UIComponent\$b"
     private const val HOME_MENU_ITEM_CLASS = "com.bilibili.lib.homepage.startdust.menu.a"
-    private const val HOME_BASE_MAIN_FRAME_FRAGMENT = "tv.danmaku.bili.ui.main2.basic.BaseMainFrameFragment"
+    private val HOME_BASE_MAIN_FRAME_FRAGMENTS = setOf(
+        "tv.danmaku.bili.ui.main2.basic.BaseMainFrameFragment",
+        "tv.danmaku.p9138bili.p9228ui.main2.basic.BaseMainFrameFragment",
+        "tv.danmaku.bili.ui.main2.MainFragment",
+        "tv.danmaku.p9138bili.p9228ui.main2.MainFragment",
+    )
     private const val HOME_MAIN_FRAGMENT = "tv.danmaku.bili.ui.main2.MainFragment"
     private const val HOME_DEFAULT_SEARCH_WORD_CLASS = "com.bilibili.app.comm.list.common.api.b"
     private val BOTTOM_TAB_HOST_CLASSES = setOf(
         "com.bilibili.lib.homepage.widget.TabHost",
+        "com.bilibili.p5690lib.p5708homepage.widget.TabHost",
+        "tv.danmaku.bili.ui.main2.widget.TabHost",
+        "tv.danmaku.p9138bili.p9228ui.main2.widget.TabHost",
     )
     private val PEGASUS_RESPONSE_CLASSES = arrayOf(
         "com.bilibili.pegasus.data.base.PegasusResponse",
