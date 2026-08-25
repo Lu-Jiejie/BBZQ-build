@@ -142,6 +142,7 @@ object BiliSymbolResolver {
     private const val HP_TRIPLE_SPEED = "TripleSpeedHook.ExperimentReader"
     private const val HP_CUSTOM_THEME = "CustomThemeHook.ThemeStore"
     private const val HP_CUSTOM_SKIN = "CustomSkinHook.GarbResolver"
+    private const val HP_VIDEO_QUALITY = "VideoQualityHook.QualityStrategy"
     private const val PLAY_SPEED_EXPERIMENT_PREF_KEY = "sp_play_speed_experiment"
     private const val HIGH_FRAME_RATE_SPEED_RESET_LOG = "reset 3x speed because target quality"
     private const val PLAY_SPEED_UTILS_CLASS = "com.bilibili.playerbizcommonv2.utils.D"
@@ -341,6 +342,9 @@ object BiliSymbolResolver {
         val customSkin = scanOptionalHookPoint(HP_CUSTOM_SKIN, hookPoints, scanErrors, log) {
             scanCustomSkin(classLoader, ::bridge)
         }
+        val videoQuality = scanOptionalHookPoint(HP_VIDEO_QUALITY, hookPoints, scanErrors, log) {
+            scanVideoQuality(classLoader, ::bridge)
+        }
 
         runCatching { bridge?.close() }
             .onFailure { recordError("DexKitBridge close failed: ${it.scanMessage()}") }
@@ -379,6 +383,7 @@ object BiliSymbolResolver {
             tripleSpeed = tripleSpeed,
             customTheme = customTheme,
             customSkin = customSkin,
+            videoQuality = videoQuality,
         )
     }
 
@@ -904,6 +909,83 @@ object BiliSymbolResolver {
             evidence = "fragments=${methods.size},preference=${preferenceClass.name}",
         )
         return SymbolScanResult.Found(symbols, methods.joinToString("|") { it.declaringClass.name }, symbols.evidence)
+    }
+
+    private fun scanVideoQuality(
+        classLoader: ClassLoader,
+        bridge: () -> DexKitBridge?,
+    ): SymbolScanResult<VideoQualitySymbols> {
+        val currentBridge = bridge() ?: return SymbolScanResult.Missing("DexKitBridge unavailable")
+        
+        // 1. AutoSupremumQuality constructor
+        val autoSupremumQualityClass = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("AutoSupremumQuality(loginHalfScreen=")),
+            ).mapNotNull { classLoader.loadClassOrNull(it.name) }.firstOrNull()
+        }.getOrNull()
+
+        val autoSupremumCtor = autoSupremumQualityClass?.declaredConstructors?.firstOrNull { ctor ->
+            ctor.parameterTypes.size == 6 && ctor.parameterTypes.all { it == Int::class.javaPrimitiveType }
+        }?.apply { isAccessible = true }
+
+        // 2. QualityStrategyProvider selectQuality method
+        val buildStrategyMethod = runCatching {
+            currentBridge.findMethod(
+                FindMethod.create().matcher(MethodMatcher.create().usingStrings("Quality Strategy share:")),
+            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }.firstOrNull()
+        }.getOrNull()
+
+        val providerClass = buildStrategyMethod?.declaringClass
+        val selectQualityMethod = providerClass?.declaredMethods?.firstOrNull { method ->
+            method.parameterCount == 3 &&
+                autoSupremumQualityClass != null &&
+                method.parameterTypes[0] == autoSupremumQualityClass &&
+                method.parameterTypes[1] == Boolean::class.javaPrimitiveType &&
+                method.parameterTypes[2] == Boolean::class.javaPrimitiveType
+        }?.apply { isAccessible = true }
+
+        // 3. PlayerPreloadHolder (PreloadData(type=)
+        val preloadMethods = runCatching {
+            val preloadClass = currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("PreloadData(type=")),
+            ).mapNotNull { classLoader.loadClassOrNull(it.name) }.firstOrNull()
+            val outerHolderClass = preloadClass?.declaringClass
+            outerHolderClass?.declaredMethods?.filter {
+                Modifier.isPublic(it.modifiers) && it.parameterCount == 1
+            }?.onEach { it.isAccessible = true }.orEmpty()
+        }.getOrElse { emptyList() }
+
+        // 4. PlayerQualityService (player.unite_login_qn)
+        val qualityServiceMethods = runCatching {
+            currentBridge.findMethod(
+                FindMethod.create().matcher(MethodMatcher.create().usingStrings("player.unite_login_qn")),
+            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+                .onEach { it.isAccessible = true }
+        }.getOrElse { emptyList() }
+
+        // 5. PlayerSettingHelper (quality settings:)
+        val defaultQnMethod = runCatching {
+            currentBridge.findMethod(
+                FindMethod.create().matcher(MethodMatcher.create().usingStrings("quality settings:")),
+            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+                .firstOrNull { it.returnType == Int::class.javaPrimitiveType || it.returnType == Int::class.javaObjectType }
+                ?.apply { isAccessible = true }
+        }.getOrNull()
+
+        val symbols = VideoQualitySymbols(
+            autoSupremumQualityConstructor = autoSupremumCtor?.let(ConstructorDescriptor::of),
+            qualityStrategySelectMethod = selectQualityMethod?.let(MethodDescriptor::of),
+            playerPreloadGetMethods = preloadMethods.map(MethodDescriptor::of),
+            playerQualityServiceMethods = qualityServiceMethods.map(MethodDescriptor::of),
+            playerSettingHelperGetDefaultQnMethod = defaultQnMethod?.let(MethodDescriptor::of),
+            evidence = "autoSupremum=${autoSupremumCtor != null},strategy=${selectQualityMethod != null},preload=${preloadMethods.size},service=${qualityServiceMethods.size},setting=${defaultQnMethod != null}",
+        )
+
+        return if (autoSupremumCtor != null || selectQualityMethod != null || preloadMethods.isNotEmpty() || qualityServiceMethods.isNotEmpty()) {
+            SymbolScanResult.Found(symbols, autoSupremumQualityClass?.name ?: "VideoQuality", symbols.evidence)
+        } else {
+            SymbolScanResult.Missing("video quality hook points not found")
+        }
     }
 
     private fun scanCustomSkin(

@@ -18,6 +18,7 @@ import io.github.bbzq.feats.hook.DownloadThreadHook
 import io.github.bbzq.feats.hook.DynamicPageHook
 import io.github.bbzq.feats.hook.TeenagersModeHook
 import io.github.bbzq.feats.hook.TryFreeQualityHook
+import io.github.bbzq.feats.hook.VideoQualityHook
 import io.github.bbzq.feats.hook.FreeCopyHook
 import io.github.bbzq.feats.hook.HomeRecommendAdHook
 import io.github.bbzq.feats.hook.HomeRecommendPreloadHook
@@ -183,6 +184,7 @@ object RoamingRuntime {
                 ::TripleSpeedHook,
                 ::LongPressSpeedLockHook,
                 ::TryFreeQualityHook,
+                ::VideoQualityHook,
                 ::CustomCdnHook,
                 ::ChronosPromotionHook,
                 ::SkipVideoAdHook,

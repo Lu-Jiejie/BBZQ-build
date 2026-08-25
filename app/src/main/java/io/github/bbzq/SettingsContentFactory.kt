@@ -99,6 +99,8 @@ class SettingsContentFactory(
     private lateinit var mineComponentPickerSummary: TextView
     private lateinit var symbolScanStatusSummary: TextView
     private lateinit var customCdnHostSummary: TextView
+    private lateinit var halfScreenQualitySummary: TextView
+    private lateinit var fullScreenQualitySummary: TextView
     /** 「检查更新」行的摘要文本视图，用于回显检查状态；界面销毁时置空避免泄漏。 */
     private var updateCheckSummaryView: TextView? = null
 
@@ -897,6 +899,8 @@ class SettingsContentFactory(
                 ModuleSettings.KEY_AVOID_HDR_DOLBY_ENABLED,
                 false,
             )
+            rows += createHalfScreenQualityRow()
+            rows += createFullScreenQualityRow()
             rows += createSwitchRow(
                 context.getString(R.string.video_download_title),
                 context.getString(R.string.video_download_summary),
@@ -1611,6 +1615,80 @@ class SettingsContentFactory(
         }.also { customSkinConfigRow = it }
     }
 
+    private fun createHalfScreenQualityRow(): View {
+        halfScreenQualitySummary = TextView(context).apply {
+            textSize = 12f
+            setTextColor(summaryTextColor)
+            setPadding(0, dp(4), 0, 0)
+        }
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showHalfScreenQualityDialog() }
+            addView(TextView(context).apply {
+                text = context.getString(R.string.half_screen_quality_title)
+                textSize = 15f
+                setTextColor(titleTextColor)
+            })
+            addView(halfScreenQualitySummary)
+        }
+    }
+
+    private fun showHalfScreenQualityDialog() {
+        val options = ModuleSettings.halfScreenQualityOptions
+        val current = ModuleSettings.getHalfScreenQuality(prefs)
+        val selected = options.indexOfFirst { it.qn == current }.coerceAtLeast(0)
+        val labels = options.map { it.label }.toTypedArray()
+        AlertDialog.Builder(context)
+            .setTitle(R.string.half_screen_quality_dialog_title)
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                dialog.dismiss()
+                prefs.edit().putInt(ModuleSettings.KEY_HALF_SCREEN_QUALITY, options[which].qn).apply()
+                refresh()
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    private fun createFullScreenQualityRow(): View {
+        fullScreenQualitySummary = TextView(context).apply {
+            textSize = 12f
+            setTextColor(summaryTextColor)
+            setPadding(0, dp(4), 0, 0)
+        }
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showFullScreenQualityDialog() }
+            addView(TextView(context).apply {
+                text = context.getString(R.string.full_screen_quality_title)
+                textSize = 15f
+                setTextColor(titleTextColor)
+            })
+            addView(fullScreenQualitySummary)
+        }
+    }
+
+    private fun showFullScreenQualityDialog() {
+        val options = ModuleSettings.fullScreenQualityOptions
+        val current = ModuleSettings.getFullScreenQuality(prefs)
+        val selected = options.indexOfFirst { it.qn == current }.coerceAtLeast(0)
+        val labels = options.map { it.label }.toTypedArray()
+        AlertDialog.Builder(context)
+            .setTitle(R.string.full_screen_quality_dialog_title)
+            .setSingleChoiceItems(labels, selected) { dialog, which ->
+                dialog.dismiss()
+                prefs.edit().putInt(ModuleSettings.KEY_FULL_SCREEN_QUALITY, options[which].qn).apply()
+                refresh()
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
     private fun createCustomCdnHostRow(): View {
         customCdnHostSummary = TextView(context).apply {
             textSize = 12f
@@ -2230,6 +2308,16 @@ class SettingsContentFactory(
             } else {
                 context.getString(R.string.custom_cdn_host_current_summary, host)
             }
+        }
+        if (::halfScreenQualitySummary.isInitialized) {
+            val qn = ModuleSettings.getHalfScreenQuality(prefs)
+            val label = ModuleSettings.halfScreenQualityOptions.firstOrNull { it.qn == qn }?.label ?: qn.toString()
+            halfScreenQualitySummary.text = context.getString(R.string.half_screen_quality_summary, label)
+        }
+        if (::fullScreenQualitySummary.isInitialized) {
+            val qn = ModuleSettings.getFullScreenQuality(prefs)
+            val label = ModuleSettings.fullScreenQualityOptions.firstOrNull { it.qn == qn }?.label ?: qn.toString()
+            fullScreenQualitySummary.text = context.getString(R.string.full_screen_quality_summary, label)
         }
         bottomBarItemCheckBoxes.forEach { (id, checkBox) ->
             checkBox.isEnabled = bottomBarEnabled

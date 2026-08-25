@@ -24,6 +24,8 @@ object ModuleSettings {
     const val KEY_UNLOCK_VIDEO_FEATURES_UI_ENABLED = "unlock_video_features_ui_enabled"
     const val KEY_UNLOCK_HIGHEST_BITRATE_ENABLED = "unlock_highest_bitrate_enabled"
     const val KEY_AVOID_HDR_DOLBY_ENABLED = "avoid_hdr_dolby_enabled"
+    const val KEY_HALF_SCREEN_QUALITY = "half_screen_quality"
+    const val KEY_FULL_SCREEN_QUALITY = "full_screen_quality"
     const val KEY_VIDEO_DOWNLOAD_ENABLED = "video_download_enabled"
     const val KEY_AUTO_LIKE_VIDEO_DETAIL_ENABLED = "auto_like_video_detail_enabled"
     const val KEY_PLAYER_TRANSPARENT_STATUS_BAR_ENABLED = "player_transparent_status_bar_enabled"
@@ -237,6 +239,12 @@ object ModuleSettings {
         ExportableConfigSpec(KEY_AVOID_HDR_DOLBY_ENABLED, ExportableValueType.BOOLEAN) {
             it.getBoolean(KEY_AVOID_HDR_DOLBY_ENABLED, false)
         },
+        ExportableConfigSpec(KEY_HALF_SCREEN_QUALITY, ExportableValueType.INT) {
+            getHalfScreenQuality(it)
+        },
+        ExportableConfigSpec(KEY_FULL_SCREEN_QUALITY, ExportableValueType.INT) {
+            getFullScreenQuality(it)
+        },
         ExportableConfigSpec(KEY_VIDEO_DOWNLOAD_ENABLED, ExportableValueType.BOOLEAN) {
             it.getBoolean(KEY_VIDEO_DOWNLOAD_ENABLED, false)
         },
@@ -382,6 +390,43 @@ object ModuleSettings {
     fun isAvoidHdrDolbyEnabled(prefs: SharedPreferences): Boolean =
         isUnlockHighestBitrateEnabled(prefs) &&
             prefs.getBoolean(KEY_AVOID_HDR_DOLBY_ENABLED, false)
+
+    data class QualityOption(val qn: Int, val label: String)
+
+    val halfScreenQualityOptions = listOf(
+        QualityOption(0, "默认"),
+        QualityOption(1, "跟随全屏清晰度"),
+        QualityOption(16, "360P 流畅"),
+        QualityOption(32, "480P 清晰"),
+        QualityOption(64, "720P 高清"),
+        QualityOption(74, "720P60 高帧率"),
+        QualityOption(80, "1080P 高清"),
+        QualityOption(112, "1080P 高码率"),
+        QualityOption(116, "1080P60 高帧率"),
+        QualityOption(120, "4K 超清"),
+        QualityOption(127, "8K 超高清"),
+    )
+
+    val fullScreenQualityOptions = listOf(
+        QualityOption(0, "默认"),
+        QualityOption(16, "360P 流畅"),
+        QualityOption(32, "480P 清晰"),
+        QualityOption(64, "720P 高清"),
+        QualityOption(74, "720P60 高帧率"),
+        QualityOption(80, "1080P 高清"),
+        QualityOption(112, "1080P 高码率"),
+        QualityOption(116, "1080P60 高帧率"),
+        QualityOption(120, "4K 超清"),
+        QualityOption(127, "8K 超高清"),
+    )
+
+    fun getHalfScreenQuality(prefs: SharedPreferences): Int {
+        return prefs.getInt(KEY_HALF_SCREEN_QUALITY, 0)
+    }
+
+    fun getFullScreenQuality(prefs: SharedPreferences): Int {
+        return prefs.getInt(KEY_FULL_SCREEN_QUALITY, 0)
+    }
 
     fun isVideoDownloadEnabled(prefs: SharedPreferences): Boolean =
         isTryFreeQualitySettingsVisible(prefs) && prefs.getBoolean(KEY_VIDEO_DOWNLOAD_ENABLED, false)
