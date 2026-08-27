@@ -775,6 +775,14 @@ class SettingsContentFactory(
 
     private fun aboutRows(): List<View> {
         val rows = mutableListOf<View>()
+        rows += createClickableInfoRow(
+            context.getString(R.string.action_restart_bilibili_title),
+            context.getString(R.string.action_restart_bilibili_summary),
+        ) {
+            (context as? Activity)?.let { activity ->
+                RootUtils.showRestartBilibiliDialog(activity, prefs)
+            }
+        }
         rows += createSwitchRow(
             context.getString(R.string.about_hide_desktop_icon_title),
             context.getString(R.string.about_hide_desktop_icon_summary),
@@ -825,6 +833,14 @@ class SettingsContentFactory(
     )
 
     private fun configBackupRows(): List<View> = listOf(
+        createClickableInfoRow(
+            context.getString(R.string.action_restart_bilibili_title),
+            context.getString(R.string.action_restart_bilibili_summary),
+        ) {
+            (context as? Activity)?.let { activity ->
+                RootUtils.showRestartBilibiliDialog(activity, prefs)
+            }
+        },
         createClickableInfoRow(
             context.getString(R.string.about_export_config_title),
             context.getString(R.string.about_export_config_summary),

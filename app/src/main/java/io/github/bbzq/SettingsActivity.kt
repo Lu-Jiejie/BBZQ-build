@@ -299,6 +299,20 @@ class SettingsActivity : Activity() {
             })
 
             addView(TextView(this@SettingsActivity).apply {
+                text = getString(R.string.toolbar_save_and_restart)
+                textSize = 15f
+                setTextColor(getColor(R.color.accent_pink))
+                isClickable = true
+                isFocusable = true
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener {
+                    RootUtils.showRestartBilibiliDialog(this@SettingsActivity, prefs) {
+                        finish()
+                    }
+                }
+            })
+
+            addView(TextView(this@SettingsActivity).apply {
                 text = getString(R.string.settings_done)
                 textSize = 15f
                 setTextColor(getColor(R.color.accent_pink))
