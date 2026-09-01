@@ -2446,7 +2446,11 @@ object BiliSymbolResolver {
             } ?: return@mapNotNull null
             val itemsField = responseClass.allFields()
                 .filter { List::class.java.isAssignableFrom(it.type) }
-                .singleOrNull()
+                .firstOrNull {
+                    it.name.startsWith("cards", ignoreCase = true) ||
+                        it.name.startsWith("relates", ignoreCase = true) ||
+                        it.name.startsWith("items", ignoreCase = true)
+                } ?: responseClass.allFields().filter { List::class.java.isAssignableFrom(it.type) }.singleOrNull()
             RelateResponseGetItemsSymbols(MethodDescriptor.of(getItems), itemsField?.let(FieldDescriptor::of))
         }.distinctBy { it.getItems.declaringClassName + "#" + it.getItems.name }
 
@@ -4429,6 +4433,7 @@ object BiliSymbolResolver {
         "getActivityState",
     )
     private val VIDEO_DETAIL_RELATE_RESPONSE_CLASSES = arrayOf(
+        "com.bapis.bilibili.app.viewunite.common.Relates",
         "com.bapis.bilibili.app.viewunite.v1.Relates",
         "com.bapis.bilibili.app.viewunite.v1.RelatesFeedReply",
         "com.bapis.bilibili.app.view.v1.RelatesFeedReply",

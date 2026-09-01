@@ -92,7 +92,7 @@ data class BiliHookSymbols(
         .putOpt("videoQuality", videoQuality?.toJson())
 
     companion object {
-        const val CACHE_SCHEMA_VERSION = 37
+        const val CACHE_SCHEMA_VERSION = 38
 
         fun fromJson(raw: String?): BiliHookSymbols? {
             if (raw.isNullOrBlank()) return null
@@ -147,7 +147,7 @@ data class BiliHookSymbols(
 }
 
 object DexKitRuleVersions {
-    const val CURRENT = 57
+    const val CURRENT = 58
 }
 
 data class HookPointStatus(

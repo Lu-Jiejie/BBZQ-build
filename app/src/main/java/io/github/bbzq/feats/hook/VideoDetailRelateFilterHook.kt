@@ -255,6 +255,7 @@ class VideoDetailRelateFilterHook(env: RoamingEnv) : BaseRoamingHook(env) {
 
     private companion object {
         private val SUB_GETTERS = arrayOf(
+            "getBasicInfo",
             "getAv",
             "getGame",
             "getCm",
@@ -263,7 +264,12 @@ class VideoDetailRelateFilterHook(env: RoamingEnv) : BaseRoamingHook(env) {
             "getSpecial",
             "getBangumi",
             "getBangumiSeason",
+            "getBangumiAv",
+            "getBangumiUgc",
+            "getHistoryAv",
             "getCourse",
+            "getMiniProgram",
+            "getAiCard",
         )
     }
 }
