@@ -2912,6 +2912,7 @@ object BiliSymbolResolver {
         val playerCoreReady = playerCoreCurrent.isNotEmpty() && playerCoreState.isNotEmpty() && playerCoreSeek.isNotEmpty()
         val cardReady = cardCurrent.isNotEmpty() && cardState.isNotEmpty() && cardSeek.isNotEmpty()
         val storyReady = storyCurrent.isNotEmpty() && storySeek.isNotEmpty()
+        val controllerReady = playerCoreReady || cardReady || storyReady
         val hookPoints = listOf(
             childHookPoint(HP_SKIP_VIDEO_AD_PLAY_VIEW, playViewMethods.isNotEmpty(), "play view hook methods not found", "methods=${playViewMethods.size}"),
             skipVideoAdControllerHookPoint(
@@ -2937,7 +2938,7 @@ object BiliSymbolResolver {
         )
         val missingReason = when {
             playViewMethods.isEmpty() -> "skip video ad play view hook points not found"
-            !playerCoreReady && !cardReady -> "skip video ad controller hook points not found"
+            !controllerReady -> "skip video ad controller hook points not found"
             else -> null
         }
         if (missingReason != null) {
