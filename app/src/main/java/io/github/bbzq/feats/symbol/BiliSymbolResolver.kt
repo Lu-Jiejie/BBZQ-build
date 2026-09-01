@@ -3712,8 +3712,8 @@ object BiliSymbolResolver {
 
     private fun Class<*>.isCommentActionBaseType(actionBases: List<Class<*>> = emptyList()): Boolean {
         if (actionBases.any { it == this || it.isAssignableFrom(this) || this.isAssignableFrom(it) }) return true
-        if (name == "Kj.AbstractC8070c") return true
-        if (simpleName.contains("Action", ignoreCase = true) && name.startsWith("Kj.")) return true
+        if (name == "Kj.AbstractC8070c" || name == "Wk.AbstractC24337c" || name == "Wk.c") return true
+        if (simpleName.contains("Action", ignoreCase = true) && (name.startsWith("Kj.") || name.startsWith("Wk."))) return true
         return allMethods().any { method ->
             method.name == "a" &&
                 method.returnType == Void.TYPE &&
@@ -4241,9 +4241,11 @@ object BiliSymbolResolver {
     private val COMMENT_ACTION_BASE_CLASSES = arrayOf(
         "Kj.AbstractC8070c",
         "Kj.c",
+        "Wk.AbstractC24337c",
+        "Wk.c",
     )
     private const val QUICK_REPLY_SHOW_PUBLISH_DIALOG_STRING = "ShowPublishDialog(args="
-    private val QUICK_REPLY_DIALOG_COLLECTOR_CLASSES = (4..40).flatMap { i ->
+    private val QUICK_REPLY_DIALOG_COLLECTOR_CLASSES = (1..50).flatMap { i ->
         listOf(
             "com.bilibili.app.comment3.ui.CommentContainerImpl\$attachRepository\$$i",
             "com.bilibili.p4439app.comment3.p4518ui.CommentContainerImpl\$attachRepository\$$i",
