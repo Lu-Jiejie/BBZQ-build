@@ -44,77 +44,70 @@ class TryFreeQualityHook(env: io.github.bbzq.feats.RoamingEnv) : BaseRoamingHook
                 env.hookBefore(setTextMethod) { param ->
                     val tv = param.thisObject as? android.widget.TextView ?: return@hookBefore
                     if (tv.id == android.view.View.NO_ID) return@hookBefore
-                    val resName = runCatching { tv.resources.getResourceEntryName(tv.id) }.getOrNull()?.lowercase() ?: return@hookBefore
-                    if (resName == "desc" || resName == "tv_desc" || resName == "expandable_desc" ||
-                        resName == "video_desc" || resName == "tv_description" || resName.contains("desc")
-                    ) {
-                        val text = param.args[0] as? CharSequence ?: return@hookBefore
-                        val textStr = text.toString()
-                        if (textStr.isNotBlank() && !textStr.contains("下载视频")) {
-                            tv.isFocusable = true
-                            tv.isClickable = true
-                            tv.isEnabled = true
-                            tv.setTextIsSelectable(true)
-                            tv.movementMethod = android.text.method.LinkMovementMethod.getInstance()
 
-                            val spannable = android.text.SpannableStringBuilder(text)
-                            spannable.append("\n\n")
-                            
-                            // Stats Span
-                            val statsText = "视频数据"
-                            val statsSpan = android.text.SpannableString(statsText)
-                            statsSpan.setSpan(object : android.text.style.ClickableSpan() {
-                                override fun onClick(widget: android.view.View) {
-                                    val ctx = widget.context
-                                    var activity: android.app.Activity? = null
-                                    var current = ctx
-                                    while (current is android.content.ContextWrapper) {
-                                        if (current is android.app.Activity) {
-                                            activity = current
-                                            break
-                                        }
-                                        current = current.baseContext
-                                    }
-                                    activity?.let { VideoStatsOverlayController.getOrCreate(it).showStats(it) }
-                                }
-                                override fun updateDrawState(ds: android.text.TextPaint) {
-                                    super.updateDrawState(ds)
-                                    ds.color = android.graphics.Color.parseColor("#FB7299")
-                                    ds.isUnderlineText = false
-                                }
-                            }, 0, statsSpan.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                            
-                            // Download Span
-                            val dlText = "下载视频"
-                            val dlSpan = android.text.SpannableString(dlText)
-                            dlSpan.setSpan(object : android.text.style.ClickableSpan() {
-                                override fun onClick(widget: android.view.View) {
-                                    val ctx = widget.context
-                                    var activity: android.app.Activity? = null
-                                    var current = ctx
-                                    while (current is android.content.ContextWrapper) {
-                                        if (current is android.app.Activity) {
-                                            activity = current
-                                            break
-                                        }
-                                        current = current.baseContext
-                                    }
-                                    activity?.let { VideoStatsOverlayController.getOrCreate(it).showDownload(it) }
-                                }
-                                override fun updateDrawState(ds: android.text.TextPaint) {
-                                    super.updateDrawState(ds)
-                                    ds.color = android.graphics.Color.parseColor("#FB7299")
-                                    ds.isUnderlineText = false
-                                }
-                            }, 0, dlSpan.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-
-                            spannable.append(" ")
-                            spannable.append(statsSpan)
-                            spannable.append(" | ")
-                            spannable.append(dlSpan)
-                            spannable.append(" ")
-                            param.args[0] = spannable
+                    val ctx = tv.context ?: return@hookBefore
+                    var activity: android.app.Activity? = null
+                    var current = ctx
+                    while (current is android.content.ContextWrapper) {
+                        if (current is android.app.Activity) {
+                            activity = current
+                            break
                         }
+                        current = current.baseContext
+                    }
+                    if (activity == null || !isVideoDetailActivity(activity)) return@hookBefore
+
+                    val resName = runCatching { tv.resources.getResourceEntryName(tv.id) }.getOrNull()?.lowercase() ?: return@hookBefore
+                    if (!isTargetDescResName(resName)) return@hookBefore
+
+                    val text = param.args[0] as? CharSequence ?: return@hookBefore
+                    val textStr = text.toString()
+                    if (textStr.isNotBlank() && !textStr.contains("下载视频")) {
+                        tv.isFocusable = true
+                        tv.isClickable = true
+                        tv.isEnabled = true
+                        tv.setTextIsSelectable(true)
+                        tv.movementMethod = android.text.method.LinkMovementMethod.getInstance()
+
+                        val spannable = android.text.SpannableStringBuilder(text)
+                        spannable.append("\n\n")
+                        
+                        // Stats Span
+                        val statsText = "视频数据"
+                        val statsSpan = android.text.SpannableString(statsText)
+                        statsSpan.setSpan(object : android.text.style.ClickableSpan() {
+                            override fun onClick(widget: android.view.View) {
+                                val targetActivity = findActivity(widget.context) ?: activity
+                                VideoStatsOverlayController.getOrCreate(targetActivity).showStats(targetActivity)
+                            }
+                            override fun updateDrawState(ds: android.text.TextPaint) {
+                                super.updateDrawState(ds)
+                                ds.color = android.graphics.Color.parseColor("#FB7299")
+                                ds.isUnderlineText = false
+                            }
+                        }, 0, statsSpan.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        
+                        // Download Span
+                        val dlText = "下载视频"
+                        val dlSpan = android.text.SpannableString(dlText)
+                        dlSpan.setSpan(object : android.text.style.ClickableSpan() {
+                            override fun onClick(widget: android.view.View) {
+                                val targetActivity = findActivity(widget.context) ?: activity
+                                VideoStatsOverlayController.getOrCreate(targetActivity).showDownload(targetActivity)
+                            }
+                            override fun updateDrawState(ds: android.text.TextPaint) {
+                                super.updateDrawState(ds)
+                                ds.color = android.graphics.Color.parseColor("#FB7299")
+                                ds.isUnderlineText = false
+                            }
+                        }, 0, dlSpan.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+
+                        spannable.append(" ")
+                        spannable.append(statsSpan)
+                        spannable.append(" | ")
+                        spannable.append(dlSpan)
+                        spannable.append(" ")
+                        param.args[0] = spannable
                     }
                 }
             }.onFailure { log("Failed to hook TextView.setText for download link", it) }
@@ -365,6 +358,68 @@ class TryFreeQualityHook(env: io.github.bbzq.feats.RoamingEnv) : BaseRoamingHook
         return UserWatermarkIdentity(
             uid = snapshot.uid,
             userName = snapshot.userName,
+        )
+    }
+
+    private fun findActivity(context: android.content.Context?): android.app.Activity? {
+        var current = context
+        while (current is android.content.ContextWrapper) {
+            if (current is android.app.Activity) return current
+            current = current.baseContext
+        }
+        return null
+    }
+
+    private fun isVideoDetailActivity(activity: android.app.Activity): Boolean {
+        val name = activity.javaClass.name
+        return name.contains("VideoDetail", ignoreCase = true) ||
+            name.contains("UnitedBizDetailsActivity", ignoreCase = true)
+    }
+
+    private fun isTargetDescResName(resName: String): Boolean {
+        if (resName in ALLOWED_DESC_RES_NAMES) return true
+        if (BLOCKED_DESC_KEYWORDS.any { resName.contains(it) }) return false
+        return resName == "desc" || resName == "tv_desc" || resName == "video_desc" ||
+            resName.endsWith("_desc") || resName.endsWith("_description") || resName.startsWith("desc_")
+    }
+
+    private companion object {
+        private val ALLOWED_DESC_RES_NAMES = setOf(
+            "desc",
+            "tv_desc",
+            "expandable_desc",
+            "video_desc",
+            "tv_description",
+            "intro_desc",
+            "ugc_desc",
+            "archive_desc",
+            "detail_desc",
+            "desc_text",
+            "desc_content",
+            "video_detail_desc",
+        )
+        private val BLOCKED_DESC_KEYWORDS = listOf(
+            "vote",
+            "poll",
+            "dialog",
+            "reply",
+            "comment",
+            "goods",
+            "mall",
+            "shop",
+            "item",
+            "badge",
+            "honor",
+            "award",
+            "card",
+            "banner",
+            "author",
+            "user",
+            "header",
+            "footer",
+            "notice",
+            "guide",
+            "toast",
         )
     }
 }
