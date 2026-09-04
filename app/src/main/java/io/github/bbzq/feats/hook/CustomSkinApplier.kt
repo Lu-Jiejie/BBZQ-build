@@ -68,10 +68,8 @@ internal object CustomSkinApplier {
                 scheduleReapply(env)
             }
         }
-        if (Build.VERSION.SDK_INT >= 33) {
-            // Android 13+ 动态注册非系统广播必须显式声明导出标志,
-            // 否则 registerReceiver 抛 SecurityException,
-            // 导致 CustomThemeHook.startHook() 整体失败,皮肤功能无法安装。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ 注册非系统广播必须显式声明导出标志
             env.hostContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             env.hostContext.registerReceiver(receiver, filter)
