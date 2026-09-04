@@ -33,7 +33,21 @@ internal object CustomSkinApplier {
         if (config.isBlank()) return
         registerThemeChangeObserver(env)
         val target = resolveTarget(env, config) ?: return
-        if (isTargetApplied(target)) return
+        if (isTargetApplied(target)) {
+            // 皮肤已应用过:load_equip 仍要幂等确保(文件缺失或未广播时补一次)。
+            // 放后台线程,避免主线程网络下载。
+            if (!applyPending.compareAndSet(false, true)) return
+            Thread {
+                try {
+                    ensureLoadEquipApplied(env, config, target)
+                } catch (error: Throwable) {
+                    env.log("Custom skin load equip ensure failed", error)
+                } finally {
+                    applyPending.set(false)
+                }
+            }.apply { name = "BBZQ-CustomSkinLoadEquip" }.start()
+            return
+        }
         if (!applyPending.compareAndSet(false, true)) return
         Thread {
             try {
@@ -111,6 +125,16 @@ internal object CustomSkinApplier {
         } else {
             apply(env, raw, target)
         }
+    }
+
+    /**
+     * 幂等确保 load_equip 已应用:文件已存在则跳过下载,但总是广播
+     * LOAD_EQUIP_CHANGE,让 B 站 web 进程重读配置并加载动画。无 load_equip 时跳过。
+     */
+    private fun ensureLoadEquipApplied(env: RoamingEnv, raw: String, target: SkinTarget) {
+        if (!ModuleSettings.isCustomSkinEnabled(env.prefs)) return
+        val root = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        applyLoadEquip(env, root, target.garbDir)
     }
 
     private fun apply(env: RoamingEnv, raw: String, target: SkinTarget) {

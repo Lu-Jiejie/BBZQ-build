@@ -1034,31 +1034,49 @@ object BiliSymbolResolver {
         }.getOrNull()
 
         // 播放页 playerIcon getter:进度条拖动图标(play_icon)挂载在
-        // ViewReply.getPlayerIcon() 的返回对象上。可选增强。
-        val playerIconGetter = runCatching {
-            classLoader.loadClassOrNull(VIEW_REPLY_CLASS)
-                ?.declaredMethods?.firstOrNull { it.name == "getPlayerIcon" && it.parameterCount == 0 }
-                ?.apply { isAccessible = true }
-        }.getOrNull()
-        // 新播放页接口(viewunite)的 play_icon 挂在 Config.playerIcon 上。
-        val configPlayerIconGetter = runCatching {
-            classLoader.loadClassOrNull(VIEW_UNITE_CONFIG_CLASS)
-                ?.declaredMethods?.firstOrNull { it.name == "getPlayerIcon" && it.parameterCount == 0 }
-                ?.apply { isAccessible = true }
-        }.getOrNull()
-
-        // B 站读取下拉刷新动画配置(garb_load_equip_conf)的方法:
-        // hook 它,在读取边界返回自制 load_equip JSON,替代写 B 站私有 blkv。可选。
-        val loadEquipConfGetter = runCatching {
+        // ViewReply.getPlayerIcon() 的返回对象上。用方法名全 dex 扫描,
+        // 兼容旧接口(app.view.v1)与新接口(viewunite 的 Config)。可选增强。
+        val playerIconGetters = runCatching {
             currentBridge.findMethod(
-                FindMethod.create().matcher(MethodMatcher.create().usingStrings("garb_load_equip_conf")),
+                FindMethod.create().matcher(MethodMatcher.create().name("getPlayerIcon")),
             ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+                .filter { it.parameterCount == 0 }
+                .distinctBy { it.declaringClass.name }
+                .map { it.apply { isAccessible = true } }
+        }.getOrDefault(emptyList())
+        val playerIconGetter = playerIconGetters.firstOrNull { it.declaringClass.name == VIEW_REPLY_CLASS }
+        val configPlayerIconGetter = playerIconGetters.firstOrNull { it.declaringClass.name != VIEW_REPLY_CLASS }
+
+        // B 站 blkv 配置读取类:含 ".blkv" 字符串(与 BiliRoamingX BLKV fingerprint 同源)。
+        // hook 其 getString(key, def),读取 garb_load_equip_conf 时返回自制 load_equip JSON,
+        // 替代写 B 站私有 blkv(key 字符串在 9.10.0 dex 中可能被拼接,不能按 key 扫描)。可选。
+        val loadEquipConfGetter = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings(".blkv")),
+            ).mapNotNull { runCatching { classLoader.loadClassOrNull(it.name) }.getOrNull() }
+                .flatMap { it.declaredMethods.asSequence() }
                 .firstOrNull { method ->
-                    method.returnType == String::class.java &&
-                        method.parameterTypes.any { it == String::class.java }
+                    method.name == "getString" && method.parameterCount == 2 &&
+                        method.parameterTypes[0] == String::class.java &&
+                        method.parameterTypes[1] == String::class.java &&
+                        method.returnType == String::class.java
                 }
                 ?.apply { isAccessible = true }
         }.getOrNull()
+
+        // 诊断:B 站消费 load_equip / play_icon 字段的类(定位真实注入点)。
+        val loadingUrlOwners = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("loading_url")),
+            ).mapNotNull { runCatching { classLoader.loadClassOrNull(it.name) }.getOrNull() }
+                .map { it.name }.distinct().take(3)
+        }.getOrDefault(emptyList())
+        val dragLeftPngOwners = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("drag_left_png")),
+            ).mapNotNull { runCatching { classLoader.loadClassOrNull(it.name) }.getOrNull() }
+                .map { it.name }.distinct().take(3)
+        }.getOrDefault(emptyList())
 
         val symbols = CustomSkinSymbols(
             resolverMethod = MethodDescriptor.of(resolverMethod),
@@ -1074,7 +1092,9 @@ object BiliSymbolResolver {
                 ",loadEquip=${skinResponseLoadEquipSetter != null}" +
                 ",playerIcon=${playerIconGetter != null}" +
                 ",configPlayerIcon=${configPlayerIconGetter != null}" +
-                ",loadEquipConf=${loadEquipConfGetter != null}",
+                ",loadEquipConf=${loadEquipConfGetter != null}" +
+                ",loadingUrl=${loadingUrlOwners.joinToString("|")}" +
+                ",dragLeft=${dragLeftPngOwners.joinToString("|")}",
         )
         return SymbolScanResult.Found(symbols, resolverMethod.declaringClass.name, symbols.evidence)
     }
@@ -4208,7 +4228,8 @@ object BiliSymbolResolver {
     private const val BILI_SKIN = "tv.danmaku.bili.ui.theme.api.BiliSkin"
     // 播放页详情响应模型:进度条拖动图标(play_icon)挂载在 ViewReply.getPlayerIcon() 的返回对象上
     private const val VIEW_REPLY_CLASS = "com.bapis.bilibili.app.view.v1.ViewReply"
-    // 新播放页接口(viewunite)的 play_icon 挂在 ViewBase.config(Config.playerIcon)上
+    // 新播放页接口(viewunite)的 play_icon 挂在 ViewBase.config(Config.playerIcon)上;
+    // 该路径随版本可能混淆,实际扫描按方法名 getPlayerIcon 全 dex 匹配,这里仅作参考
     private const val VIEW_UNITE_CONFIG_CLASS = "com.bapis.bilibili.app.viewunite.common.Config"
     private const val STORY_VIDEO_FRAGMENT = "com.bilibili.video.story.StoryVideoFragment"
     private const val STORY_PAGER_PLAYER = "com.bilibili.video.story.player.StoryPagerPlayer"

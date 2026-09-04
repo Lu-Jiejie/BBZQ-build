@@ -132,14 +132,17 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
     /**
      * 播放页进度条拖动图标(play_icon)注入:
      * 自制主题 JSON 里的 drag_left_png / drag_right_png / middle_png
-     * 是进度条控件左拉、右拉、不拉三种状态的表现图。旧播放页接口挂载在
-     * ViewReply.getPlayerIcon() 的返回对象上,新接口(viewunite)挂在
-     * Config.getPlayerIcon() 上;这里同时 hook 两个 getter。可选增强。
+     * 是进度条控件左拉、右拉、不拉三种状态的表现图。挂载点不唯一:
+     * 旧接口 ViewReply.getPlayerIcon() 与新接口(viewunite)Config.getPlayerIcon()
+     * 都可能是消费点,这里对找到的所有 getPlayerIcon 统一注入。可选增强。
      */
     private fun hookPlayIcon(skinSymbols: RestoredCustomSkinSymbols) {
-        var installed = 0
-        listOf(skinSymbols.playerIconGetter, skinSymbols.configPlayerIconGetter).forEach { getter ->
-            if (getter == null) return@forEach
+        val getters = listOfNotNull(skinSymbols.playerIconGetter, skinSymbols.configPlayerIconGetter)
+        if (getters.isEmpty()) {
+            log("Custom skin play icon hook skipped: playerIcon getters missing")
+            return
+        }
+        getters.forEach { getter ->
             env.hookAfter(getter) { param ->
                 if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
                 val playIcon = customSkinConfig()?.optJSONObject("play_icon") ?: return@hookAfter
@@ -149,45 +152,54 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                 ) return@hookAfter
                 buildPlayerIcon(playIcon)?.let { param.result = it }
             }
-            installed++
             log("Custom skin play icon hook installed: ${getter.declaringClass.name}.${getter.name}")
         }
-        if (installed == 0) log("Custom skin play icon hook skipped: playerIcon getters missing")
     }
 
     /**
      * 通过反射构造 B 站 PlayerIcon 对象:
-     * B 站的 protobuf 消息类是可变类(BiliRoamingX 用 PlayerIcon().apply { ... }),
-     * 直接无参构造 + setDragLeftPng/setDragRightPng/setMiddlePng 赋值。
+     * 优先 newBuilder()(protobuf-lite 标准,构造器私有),失败则回退无参构造(可变消息类)。
+     * 失败不再静默,打日志便于定位。
      */
-    private fun buildPlayerIcon(playIcon: JSONObject): Any? = runCatching {
-        val playerIconClass = classLoader.loadClass(PLAYER_ICON_CLASS)
-        val icon = playerIconClass.getConstructor().newInstance()
-        playIcon.optString("drag_left_png").takeIf { it.isNotBlank() }?.let {
-            playerIconClass.getMethod("setDragLeftPng", String::class.java).invoke(icon, it)
-        }
-        playIcon.optString("drag_right_png").takeIf { it.isNotBlank() }?.let {
-            playerIconClass.getMethod("setDragRightPng", String::class.java).invoke(icon, it)
-        }
-        playIcon.optString("middle_png").takeIf { it.isNotBlank() }?.let {
-            playerIconClass.getMethod("setMiddlePng", String::class.java).invoke(icon, it)
-        }
-        icon
-    }.getOrNull()
+    private fun buildPlayerIcon(playIcon: JSONObject): Any? {
+        return runCatching {
+            val playerIconClass = classLoader.loadClass(PLAYER_ICON_CLASS)
+            val builder = runCatching { playerIconClass.getMethod("newBuilder").invoke(null) }.getOrNull()
+            val icon = builder ?: playerIconClass.getConstructor().newInstance()
+            playIcon.optString("drag_left_png").takeIf { it.isNotBlank() }?.let {
+                icon.javaClass.getMethod("setDragLeftPng", String::class.java).invoke(icon, it)
+            }
+            playIcon.optString("drag_right_png").takeIf { it.isNotBlank() }?.let {
+                icon.javaClass.getMethod("setDragRightPng", String::class.java).invoke(icon, it)
+            }
+            playIcon.optString("middle_png").takeIf { it.isNotBlank() }?.let {
+                icon.javaClass.getMethod("setMiddlePng", String::class.java).invoke(icon, it)
+            }
+            if (builder != null) {
+                icon.javaClass.getMethod("build").invoke(icon)
+            } else {
+                icon
+            }
+        }.onFailure {
+            log("Custom skin buildPlayerIcon failed: ${it.message}", it)
+        }.getOrNull()
+    }
 
     /**
      * 下拉刷新动画(load_equip)配置注入:
-     * B 站 web 进程从 blkv(garb_load_equip_conf)读取该配置;
-     * 我们写不了 B 站私有 blkv 格式,改为 hook 读取方法,
-     * 在读取边界直接返回自制 load_equip JSON。可选增强。
+     * B 站从 blkv 读取该配置(getString("garb_load_equip_conf"));
+     * 我们写不了 B 站私有 blkv 格式,改为 hook blkv 的 getString,
+     * 在读取该 key 时直接返回自制 load_equip JSON。可选增强。
      */
     private fun hookLoadEquipConf(skinSymbols: RestoredCustomSkinSymbols) {
         val loadEquipConfGetter = skinSymbols.loadEquipConfGetter ?: run {
-            log("Custom skin load equip conf hook skipped: conf getter missing")
+            log("Custom skin load equip conf hook skipped: blkv getString missing")
             return
         }
         env.hookBefore(loadEquipConfGetter) { param ->
             if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookBefore
+            // 只拦截 load_equip 配置 key,其余 blkv 读取不受影响
+            if (param.args.getOrNull(0) != LOAD_EQUIP_CONF_KEY) return@hookBefore
             val loadEquip = customSkinConfig()?.optJSONObject("load_equip") ?: return@hookBefore
             if (loadEquip.optString("loading_url").isBlank()) return@hookBefore
             param.result = loadEquip.toString()
@@ -389,6 +401,8 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         private const val MAIN_ACTIVITY = "tv.danmaku.bili.MainActivityV2"
         // 播放页进度条拖动图标模型(protobuf 生成类):newBuilder().setDragLeftPng(url)...build()
         private const val PLAYER_ICON_CLASS = "com.bapis.bilibili.app.view.v1.PlayerIcon"
+        // B 站 blkv 存储下拉刷新动画配置的 key
+        private const val LOAD_EQUIP_CONF_KEY = "garb_load_equip_conf"
 
         private fun generateColorArray(primaryColor: Int): IntArray {
             val colors = IntArray(4)
