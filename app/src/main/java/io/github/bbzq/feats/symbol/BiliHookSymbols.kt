@@ -147,7 +147,7 @@ data class BiliHookSymbols(
 }
 
 object DexKitRuleVersions {
-    const val CURRENT = 59
+    const val CURRENT = 60
 }
 
 data class HookPointStatus(
@@ -2010,6 +2010,11 @@ data class CustomSkinSymbols(
     val skinResolveMethod: MethodDescriptor? = null,
     // 播放页 playerIcon getter:用于注入进度条拖动图标(play_icon)。可选。
     val playerIconGetter: MethodDescriptor? = null,
+    // 新播放页接口(viewunite)的 playerIcon getter:同样注入 play_icon。可选。
+    val configPlayerIconGetter: MethodDescriptor? = null,
+    // B 站读取下拉刷新动画配置(garb_load_equip_conf)的方法:hook 它,
+    // 在读取边界返回自制 load_equip JSON(替代写 B 站私有 blkv)。可选。
+    val loadEquipConfGetter: MethodDescriptor? = null,
     val evidence: String,
 ) {
     fun toJson(): JSONObject = JSONObject()
@@ -2019,6 +2024,8 @@ data class CustomSkinSymbols(
         .putOpt("skinResponseLoadEquipSetter", skinResponseLoadEquipSetter?.toJson())
         .putOpt("skinResolveMethod", skinResolveMethod?.toJson())
         .putOpt("playerIconGetter", playerIconGetter?.toJson())
+        .putOpt("configPlayerIconGetter", configPlayerIconGetter?.toJson())
+        .putOpt("loadEquipConfGetter", loadEquipConfGetter?.toJson())
         .put("evidence", evidence)
 
     fun restore(classLoader: ClassLoader): RestoredCustomSkinSymbols? {
@@ -2028,6 +2035,8 @@ data class CustomSkinSymbols(
         val loadEquipSetter = skinResponseLoadEquipSetter?.restoreOptional(classLoader)
         val skinResolveMethod = skinResolveMethod?.restoreOptional(classLoader)
         val playerIconGetter = playerIconGetter?.restoreOptional(classLoader)
+        val configPlayerIconGetter = configPlayerIconGetter?.restoreOptional(classLoader)
+        val loadEquipConfGetter = loadEquipConfGetter?.restoreOptional(classLoader)
         return RestoredCustomSkinSymbols(
             resolverMethod = resolver,
             skinResponseClass = skinResponseClass,
@@ -2035,6 +2044,8 @@ data class CustomSkinSymbols(
             skinResponseLoadEquipSetter = loadEquipSetter,
             skinResolveMethod = skinResolveMethod,
             playerIconGetter = playerIconGetter,
+            configPlayerIconGetter = configPlayerIconGetter,
+            loadEquipConfGetter = loadEquipConfGetter,
         )
     }
 
@@ -2046,6 +2057,8 @@ data class CustomSkinSymbols(
             skinResponseLoadEquipSetter = obj.optJSONObject("skinResponseLoadEquipSetter")?.let(MethodDescriptor::fromJson),
             skinResolveMethod = obj.optJSONObject("skinResolveMethod")?.let(MethodDescriptor::fromJson),
             playerIconGetter = obj.optJSONObject("playerIconGetter")?.let(MethodDescriptor::fromJson),
+            configPlayerIconGetter = obj.optJSONObject("configPlayerIconGetter")?.let(MethodDescriptor::fromJson),
+            loadEquipConfGetter = obj.optJSONObject("loadEquipConfGetter")?.let(MethodDescriptor::fromJson),
             evidence = obj.optString("evidence", "-"),
         )
     }
@@ -2058,6 +2071,8 @@ data class RestoredCustomSkinSymbols(
     val skinResponseLoadEquipSetter: Method?,
     val skinResolveMethod: Method?,
     val playerIconGetter: Method?,
+    val configPlayerIconGetter: Method?,
+    val loadEquipConfGetter: Method?,
 )
 
 data class CustomThemeSymbols(

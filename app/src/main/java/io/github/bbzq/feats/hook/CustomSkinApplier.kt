@@ -125,8 +125,33 @@ internal object CustomSkinApplier {
         URL(packageUrl).openStream().use { input -> archive.outputStream().use(input::copyTo) }
         unzipSafely(archive, target.assetsDir)
 
+        applyLoadEquip(env, root, target.garbDir)
         writeTarget(env, target)
         env.log("Custom skin applied: id=${target.id} version=${target.version}")
+    }
+
+    /**
+     * 下拉刷新动画(load_equip)适配:
+     * 与 BiliRoamingX 相同的约定——把 loading_url 下载到
+     * garb/load_equip/<base64(loading_url)> 供 B 站 web 进程加载,
+     * 再广播 LOAD_EQUIP_CHANGE 通知它重读。无 load_equip 时跳过。
+     */
+    private fun applyLoadEquip(env: RoamingEnv, root: JSONObject, garbDir: File) {
+        val loadEquip = root.optJSONObject("load_equip") ?: return
+        val url = loadEquip.optString("loading_url")
+        if (url.isBlank()) return
+        runCatching {
+            val dir = File(garbDir, "load_equip").also { it.mkdirs() }
+            val fileName = android.util.Base64.encodeToString(url.toByteArray(), android.util.Base64.NO_WRAP)
+            val target = File(dir, fileName)
+            if (!target.isFile || target.length() == 0L) {
+                URL(url).openStream().use { input -> target.outputStream().use(input::copyTo) }
+            }
+            env.hostContext.sendBroadcast(Intent("${env.packageName}.garb.LOAD_EQUIP_CHANGE"))
+            env.log("Custom skin load equip applied: $fileName")
+        }.onFailure {
+            env.log("Custom skin load equip failed", it)
+        }
     }
 
     private fun notifyGarbChanged(env: RoamingEnv, garb: String) {

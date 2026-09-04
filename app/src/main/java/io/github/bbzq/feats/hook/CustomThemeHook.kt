@@ -47,6 +47,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                 // 这样即使颜色主题符号缺失,皮肤功能依然完整。
                 hookSkinResponse(skinSymbols)
                 hookPlayIcon(skinSymbols)
+                hookLoadEquipConf(skinSymbols)
             }
             // Suppressing the reset also stops an already-equipped theme from overriding
             // the imported skin when MainActivity restores it on startup.
@@ -108,7 +109,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
      */
     private fun hookSkinResponse(skinSymbols: RestoredCustomSkinSymbols) {
         val userGarbSetter = skinSymbols.skinResponseUserGarbSetter ?: run {
-            if (skinSymbols.skinResolveMethod == null) log("Custom skin response hooks unavailable; using broadcast fallback")
+            log("Custom skin response hooks skipped: skin response class missing")
             return
         }
         env.hookBefore(userGarbSetter) { param ->
@@ -131,46 +132,68 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
     /**
      * 播放页进度条拖动图标(play_icon)注入:
      * 自制主题 JSON 里的 drag_left_png / drag_right_png / middle_png
-     * 是进度条控件左拉、右拉、不拉三种状态的表现图,挂载在
-     * ViewReply.getPlayerIcon() 的返回对象上。这里 hook 该 getter,
-     * 在 B 站读取播放页详情时返回自制的 PlayerIcon。可选增强。
+     * 是进度条控件左拉、右拉、不拉三种状态的表现图。旧播放页接口挂载在
+     * ViewReply.getPlayerIcon() 的返回对象上,新接口(viewunite)挂在
+     * Config.getPlayerIcon() 上;这里同时 hook 两个 getter。可选增强。
      */
     private fun hookPlayIcon(skinSymbols: RestoredCustomSkinSymbols) {
-        val playerIconGetter = skinSymbols.playerIconGetter ?: run {
-            log("Custom skin play icon hook skipped: playerIcon getter missing")
-            return
+        var installed = 0
+        listOf(skinSymbols.playerIconGetter, skinSymbols.configPlayerIconGetter).forEach { getter ->
+            if (getter == null) return@forEach
+            env.hookAfter(getter) { param ->
+                if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
+                val playIcon = customSkinConfig()?.optJSONObject("play_icon") ?: return@hookAfter
+                if (playIcon.optString("drag_left_png").isBlank() &&
+                    playIcon.optString("drag_right_png").isBlank() &&
+                    playIcon.optString("middle_png").isBlank()
+                ) return@hookAfter
+                buildPlayerIcon(playIcon)?.let { param.result = it }
+            }
+            installed++
+            log("Custom skin play icon hook installed: ${getter.declaringClass.name}.${getter.name}")
         }
-        env.hookAfter(playerIconGetter) { param ->
-            if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
-            val playIcon = customSkinConfig()?.optJSONObject("play_icon") ?: return@hookAfter
-            if (playIcon.optString("drag_left_png").isBlank() &&
-                playIcon.optString("drag_right_png").isBlank() &&
-                playIcon.optString("middle_png").isBlank()
-            ) return@hookAfter
-            buildPlayerIcon(playIcon)?.let { param.result = it }
-        }
-        log("Custom skin play icon hook installed: ${playerIconGetter.declaringClass.name}.${playerIconGetter.name}")
+        if (installed == 0) log("Custom skin play icon hook skipped: playerIcon getters missing")
     }
 
     /**
-     * 通过反射构造 B 站 PlayerIcon 对象(protobuf 生成类):
-     * PlayerIcon.newBuilder().setDragLeftPng(url).setDragRightPng(url).setMiddlePng(url).build()
+     * 通过反射构造 B 站 PlayerIcon 对象:
+     * B 站的 protobuf 消息类是可变类(BiliRoamingX 用 PlayerIcon().apply { ... }),
+     * 直接无参构造 + setDragLeftPng/setDragRightPng/setMiddlePng 赋值。
      */
     private fun buildPlayerIcon(playIcon: JSONObject): Any? = runCatching {
         val playerIconClass = classLoader.loadClass(PLAYER_ICON_CLASS)
-        val builder = playerIconClass.getMethod("newBuilder").invoke(null)
-        val builderClass = builder.javaClass
+        val icon = playerIconClass.getConstructor().newInstance()
         playIcon.optString("drag_left_png").takeIf { it.isNotBlank() }?.let {
-            builderClass.getMethod("setDragLeftPng", String::class.java).invoke(builder, it)
+            playerIconClass.getMethod("setDragLeftPng", String::class.java).invoke(icon, it)
         }
         playIcon.optString("drag_right_png").takeIf { it.isNotBlank() }?.let {
-            builderClass.getMethod("setDragRightPng", String::class.java).invoke(builder, it)
+            playerIconClass.getMethod("setDragRightPng", String::class.java).invoke(icon, it)
         }
         playIcon.optString("middle_png").takeIf { it.isNotBlank() }?.let {
-            builderClass.getMethod("setMiddlePng", String::class.java).invoke(builder, it)
+            playerIconClass.getMethod("setMiddlePng", String::class.java).invoke(icon, it)
         }
-        builderClass.getMethod("build").invoke(builder)
+        icon
     }.getOrNull()
+
+    /**
+     * 下拉刷新动画(load_equip)配置注入:
+     * B 站 web 进程从 blkv(garb_load_equip_conf)读取该配置;
+     * 我们写不了 B 站私有 blkv 格式,改为 hook 读取方法,
+     * 在读取边界直接返回自制 load_equip JSON。可选增强。
+     */
+    private fun hookLoadEquipConf(skinSymbols: RestoredCustomSkinSymbols) {
+        val loadEquipConfGetter = skinSymbols.loadEquipConfGetter ?: run {
+            log("Custom skin load equip conf hook skipped: conf getter missing")
+            return
+        }
+        env.hookBefore(loadEquipConfGetter) { param ->
+            if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookBefore
+            val loadEquip = customSkinConfig()?.optJSONObject("load_equip") ?: return@hookBefore
+            if (loadEquip.optString("loading_url").isBlank()) return@hookBefore
+            param.result = loadEquip.toString()
+        }
+        log("Custom skin load equip conf hook installed: ${loadEquipConfGetter.declaringClass.name}.${loadEquipConfGetter.name}")
+    }
 
     private fun customSkinConfig(): JSONObject? = runCatching {
         val raw = ModuleSettings.getCustomSkinJson(prefs)
@@ -213,6 +236,16 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             }
         }
         log("CustomTheme web colors installed: ${formatColor(color)}")
+    }
+
+    /**
+     * 下拉刷新动画(load_equip)由 web 进程渲染,该进程不跑完整皮肤流程,
+     * 这里单独安装配置读取 hook,让 web 进程也能拿到自制 load_equip。
+     */
+    fun insertLoadEquipForWebProcess() {
+        if (!ModuleSettings.isCustomSkinEnabled(prefs)) return
+        val skinSymbols = env.symbols?.customSkin?.restore(classLoader) ?: return
+        hookLoadEquipConf(skinSymbols)
     }
 
     private fun installThemeMaps(symbols: RestoredCustomThemeSymbols, primaryColor: Int) {
