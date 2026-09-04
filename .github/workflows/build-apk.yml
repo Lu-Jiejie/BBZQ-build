@@ -44,6 +44,7 @@ jobs:
           fail-on-cache-miss: false
 
       - name: 准备 keystore
+        id: prepare-ks
         env:
           KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           KS_PASS: ${{ secrets.RELEASE_STORE_PASSWORD || 'bbzq-release-pass' }}
@@ -51,9 +52,11 @@ jobs:
         run: |
           set -euo pipefail
           KS="$RUNNER_TEMP/bbzq-release.jks"
+          echo "from_secret=false" >> "$GITHUB_OUTPUT"
           if [ -n "${KEYSTORE_B64:-}" ]; then
             printf '%s' "$KEYSTORE_B64" | base64 -d > "$KS"
             echo "::notice::使用 Secrets 中提供的正式 keystore"
+            echo "from_secret=true" >> "$GITHUB_OUTPUT"
           elif [ ! -s "$KS" ]; then
             keytool -genkeypair -v \
               -keystore "$KS" \
@@ -69,7 +72,7 @@ jobs:
 
       # secrets 提供的 keystore 不应写入缓存(公开仓库有泄漏风险)
       - name: 缓存自签名 keystore
-        if: ${{ secrets.RELEASE_KEYSTORE_BASE64 == '' }}
+        if: steps.prepare-ks.outputs.from_secret == 'false'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/bbzq-release.jks
