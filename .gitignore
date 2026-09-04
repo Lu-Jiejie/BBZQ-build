@@ -12,3 +12,4 @@
 /.idea/*.xml
 keystore.properties
 /signing
+/log

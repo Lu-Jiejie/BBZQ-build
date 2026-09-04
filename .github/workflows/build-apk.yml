@@ -1,0 +1,111 @@
+name: Build BBZQ APK
+
+# 手动触发,或推送到 main/master 时自动构建
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码(完整历史,versionCode 依赖 git rev-list --count)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 安装 Android SDK(platform 37 + build-tools 37.0.0)
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: '37'
+          build-tools: '37.0.0'
+
+      # ---- 签名准备 ----
+      # 若配置了 Secrets(RELEASE_KEYSTORE_BASE64 等)则用正式签名;
+      # 否则首次生成一个自签名 keystore 并缓存到 Actions cache,
+      # 之后每次构建复用同一个 keystore,保证 APK 签名稳定(可覆盖安装)。
+      - name: 恢复缓存的 keystore
+        id: cache-ks
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/bbzq-release.jks
+          key: bbzq-keystore-${{ github.repository }}
+          fail-on-cache-miss: false
+
+      - name: 准备 keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.RELEASE_STORE_PASSWORD || 'bbzq-release-pass' }}
+          KS_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || 'bbzq' }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/bbzq-release.jks"
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$KS"
+            echo "::notice::使用 Secrets 中提供的正式 keystore"
+          elif [ ! -s "$KS" ]; then
+            keytool -genkeypair -v \
+              -keystore "$KS" \
+              -alias "$KS_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KS_PASS" -keypass "$KS_PASS" \
+              -dname "CN=BBZQ, OU=BBZQ, O=BBZQ, L=NA, ST=NA, C=CN"
+            echo "::notice::已生成自签名 keystore,后续构建会复用,保持签名稳定"
+          else
+            echo "::notice::复用缓存的 keystore"
+          fi
+          ls -l "$KS"
+
+      # secrets 提供的 keystore 不应写入缓存(公开仓库有泄漏风险)
+      - name: 缓存自签名 keystore
+        if: ${{ secrets.RELEASE_KEYSTORE_BASE64 == '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/bbzq-release.jks
+          key: bbzq-keystore-${{ github.repository }}
+
+      - name: 构建 release APK
+        env:
+          RELEASE_STORE_FILE: ${{ runner.temp }}/bbzq-release.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || 'bbzq-release-pass' }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS || 'bbzq' }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || 'bbzq-release-pass' }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: 收集 APK
+        run: |
+          echo "== app/release =="
+          ls -la app/release/ 2>/dev/null || true
+          echo "== app/build/outputs/apk/release =="
+          ls -la app/build/outputs/apk/release/ 2>/dev/null || true
+          APK=$(ls app/release/*.apk app/build/outputs/apk/release/*.apk 2>/dev/null | head -n 1)
+          if [ -n "$APK" ]; then
+            echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+            sha256sum "$APK"
+          else
+            echo "::error::未找到构建产物 APK"
+            exit 1
+          fi
+
+      - name: 上传 APK 到构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: bbzq-apk
+          path: |
+            app/release/*.apk
+            app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
