@@ -12,11 +12,13 @@ import io.github.bbzq.feats.allFields
 import io.github.bbzq.feats.allMethods
 import io.github.bbzq.feats.fieldOrNull
 import io.github.bbzq.feats.hookBefore
+import io.github.bbzq.feats.hookAfter
 import io.github.bbzq.feats.newInstanceOrNull
 import io.github.bbzq.feats.replace
 import io.github.bbzq.feats.setBooleanField
 import io.github.bbzq.feats.setIntField
 import io.github.bbzq.feats.setObjectField
+import io.github.bbzq.feats.symbol.RestoredCustomSkinSymbols
 import io.github.bbzq.feats.symbol.RestoredCustomThemeSymbols
 import org.json.JSONObject
 import java.lang.reflect.Constructor
@@ -35,23 +37,21 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         val customColorEnabled = ModuleSettings.isCustomThemeEnabled(prefs) && !customSkinEnabled
         if (customSkinEnabled) {
             CustomSkinApplier.applyIfChanged(env)
-            val resolver = env.symbols?.customSkin?.restore(classLoader)
-            if (resolver == null) {
+            val skinSymbols = env.symbols?.customSkin?.restore(classLoader)
+            if (skinSymbols == null) {
                 log("Custom skin resolver missing; using broadcast fallback")
             } else {
-                hookSkinResolver(resolver)
+                hookSkinResolver(skinSymbols.resolverMethod)
+                // 皮肤响应替换(load_equip / user_equip)与播放页图标(play_icon)注入:
+                // 使用独立的 customSkin 符号,不再依赖颜色主题扫描(customTheme),
+                // 这样即使颜色主题符号缺失,皮肤功能依然完整。
+                hookSkinResponse(skinSymbols)
+                hookPlayIcon(skinSymbols)
             }
-            // Replace the parsed skin response so every official /x/resource/show/skin
-            // refresh keeps the imported equip instead of reverting to the server garb.
             // Suppressing the reset also stops an already-equipped theme from overriding
             // the imported skin when MainActivity restores it on startup.
-            val skinSymbols = env.symbols?.customTheme?.restore(classLoader)
-            if (skinSymbols == null) {
-                log("Custom skin response hook skipped: theme symbols missing")
-            } else {
-                hookSkinResponse(skinSymbols)
-                suppressThemeReset(skinSymbols)
-            }
+            val themeSymbols = env.symbols?.customTheme?.restore(classLoader)
+            if (themeSymbols != null) suppressThemeReset(themeSymbols)
         }
         if (!customColorEnabled) {
             log("startHook: customSkin=$customSkinEnabled customColor=$customColorEnabled")
@@ -106,9 +106,9 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
      * Substitute the skin model while Bilibili parses /x/resource/show/skin.
      * Thus every official refresh receives the imported equip before it can update UI/state.
      */
-    private fun hookSkinResponse(symbols: RestoredCustomThemeSymbols) {
-        val userGarbSetter = symbols.skinResponseUserGarbSetter ?: run {
-            if (symbols.skinResolveMethod == null) log("Custom skin hooks unavailable; using broadcast fallback")
+    private fun hookSkinResponse(skinSymbols: RestoredCustomSkinSymbols) {
+        val userGarbSetter = skinSymbols.skinResponseUserGarbSetter ?: run {
+            if (skinSymbols.skinResolveMethod == null) log("Custom skin response hooks unavailable; using broadcast fallback")
             return
         }
         env.hookBefore(userGarbSetter) { param ->
@@ -117,7 +117,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             val replacement = parseHostJson(skin.toString(), userGarbSetter.parameterTypes[0]) ?: return@hookBefore
             param.args[0] = replacement
         }
-        symbols.skinResponseLoadEquipSetter?.let { loadEquipSetter ->
+        skinSymbols.skinResponseLoadEquipSetter?.let { loadEquipSetter ->
             env.hookBefore(loadEquipSetter) { param ->
                 if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookBefore
                 val loadEquip = customSkinConfig()?.optJSONObject("load_equip") ?: return@hookBefore
@@ -127,6 +127,50 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         }
         log("Custom skin response hook installed: ${userGarbSetter.declaringClass.name}")
     }
+
+    /**
+     * 播放页进度条拖动图标(play_icon)注入:
+     * 自制主题 JSON 里的 drag_left_png / drag_right_png / middle_png
+     * 是进度条控件左拉、右拉、不拉三种状态的表现图,挂载在
+     * ViewReply.getPlayerIcon() 的返回对象上。这里 hook 该 getter,
+     * 在 B 站读取播放页详情时返回自制的 PlayerIcon。可选增强。
+     */
+    private fun hookPlayIcon(skinSymbols: RestoredCustomSkinSymbols) {
+        val playerIconGetter = skinSymbols.playerIconGetter ?: run {
+            log("Custom skin play icon hook skipped: playerIcon getter missing")
+            return
+        }
+        env.hookAfter(playerIconGetter) { param ->
+            if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
+            val playIcon = customSkinConfig()?.optJSONObject("play_icon") ?: return@hookAfter
+            if (playIcon.optString("drag_left_png").isBlank() &&
+                playIcon.optString("drag_right_png").isBlank() &&
+                playIcon.optString("middle_png").isBlank()
+            ) return@hookAfter
+            buildPlayerIcon(playIcon)?.let { param.result = it }
+        }
+        log("Custom skin play icon hook installed: ${playerIconGetter.declaringClass.name}.${playerIconGetter.name}")
+    }
+
+    /**
+     * 通过反射构造 B 站 PlayerIcon 对象(protobuf 生成类):
+     * PlayerIcon.newBuilder().setDragLeftPng(url).setDragRightPng(url).setMiddlePng(url).build()
+     */
+    private fun buildPlayerIcon(playIcon: JSONObject): Any? = runCatching {
+        val playerIconClass = classLoader.loadClass(PLAYER_ICON_CLASS)
+        val builder = playerIconClass.getMethod("newBuilder").invoke(null)
+        val builderClass = builder.javaClass
+        playIcon.optString("drag_left_png").takeIf { it.isNotBlank() }?.let {
+            builderClass.getMethod("setDragLeftPng", String::class.java).invoke(builder, it)
+        }
+        playIcon.optString("drag_right_png").takeIf { it.isNotBlank() }?.let {
+            builderClass.getMethod("setDragRightPng", String::class.java).invoke(builder, it)
+        }
+        playIcon.optString("middle_png").takeIf { it.isNotBlank() }?.let {
+            builderClass.getMethod("setMiddlePng", String::class.java).invoke(builder, it)
+        }
+        builderClass.getMethod("build").invoke(builder)
+    }.getOrNull()
 
     private fun customSkinConfig(): JSONObject? = runCatching {
         val raw = ModuleSettings.getCustomSkinJson(prefs)
@@ -310,6 +354,8 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         private const val CUSTOM_THEME_ID1 = 114514
         private const val CUSTOM_THEME_ID2 = 1919810
         private const val MAIN_ACTIVITY = "tv.danmaku.bili.MainActivityV2"
+        // 播放页进度条拖动图标模型(protobuf 生成类):newBuilder().setDragLeftPng(url)...build()
+        private const val PLAYER_ICON_CLASS = "com.bapis.bilibili.app.view.v1.PlayerIcon"
 
         private fun generateColorArray(primaryColor: Int): IntArray {
             val colors = IntArray(4)

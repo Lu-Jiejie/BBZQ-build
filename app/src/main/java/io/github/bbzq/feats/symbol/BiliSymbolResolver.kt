@@ -1004,9 +1004,54 @@ object BiliSymbolResolver {
                 }
         }.getOrNull() ?: return SymbolScanResult.Missing("garb resolver method not found")
         resolverMethod.isAccessible = true
+
+        // 皮肤响应模型:含 setUserGarb / setLoadEquip setter 的类。
+        // load_equip(下拉刷新动画)与 user_equip 一样是皮肤响应的一部分,
+        // 在 B 站解析 /x/resource/show/skin 时注入,保证刷新后仍生效。
+        val skinResponseClass = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("user_equip")),
+            ).mapNotNull { classLoader.loadClassOrNull(it.name) }
+                .firstOrNull { type ->
+                    type.declaredMethods.any { it.name == "setUserGarb" && it.parameterCount == 1 }
+                }
+        }.getOrNull()
+        val skinResponseUserGarbSetter = skinResponseClass?.declaredMethods?.firstOrNull {
+            it.name == "setUserGarb" && it.parameterCount == 1
+        }?.apply { isAccessible = true }
+        val skinResponseLoadEquipSetter = skinResponseClass?.declaredMethods?.firstOrNull {
+            it.name == "setLoadEquip" && it.parameterCount == 1
+        }?.apply { isAccessible = true }
+
+        // 皮肤解析入口方法(宽松匹配):在 resolver 找不到时用于兜底判断,
+        // 与 scanCustomTheme 中的 skinResolveMethod 规则保持一致。
+        val skinResolveMethod = runCatching {
+            currentBridge.findMethod(
+                FindMethod.create().matcher(MethodMatcher.create().usingStrings("shouldApplyForceOpGarb =")),
+            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+                .firstOrNull { it.parameterCount == 1 && it.returnType != Void.TYPE }
+                ?.apply { isAccessible = true }
+        }.getOrNull()
+
+        // 播放页 playerIcon getter:进度条拖动图标(play_icon)挂载在
+        // ViewReply.getPlayerIcon() 的返回对象上。可选增强。
+        val playerIconGetter = runCatching {
+            classLoader.loadClassOrNull(VIEW_REPLY_CLASS)
+                ?.declaredMethods?.firstOrNull { it.name == "getPlayerIcon" && it.parameterCount == 0 }
+                ?.apply { isAccessible = true }
+        }.getOrNull()
+
         val symbols = CustomSkinSymbols(
             resolverMethod = MethodDescriptor.of(resolverMethod),
-            evidence = "resolver=${resolverMethod.declaringClass.name}.${resolverMethod.name}",
+            skinResponseClassName = skinResponseClass?.name,
+            skinResponseUserGarbSetter = skinResponseUserGarbSetter?.let(MethodDescriptor::of),
+            skinResponseLoadEquipSetter = skinResponseLoadEquipSetter?.let(MethodDescriptor::of),
+            skinResolveMethod = skinResolveMethod?.let(MethodDescriptor::of),
+            playerIconGetter = playerIconGetter?.let(MethodDescriptor::of),
+            evidence = "resolver=${resolverMethod.declaringClass.name}.${resolverMethod.name}" +
+                ",userGarb=${skinResponseUserGarbSetter != null}" +
+                ",loadEquip=${skinResponseLoadEquipSetter != null}" +
+                ",playerIcon=${playerIconGetter != null}",
         )
         return SymbolScanResult.Found(symbols, resolverMethod.declaringClass.name, symbols.evidence)
     }
@@ -4138,6 +4183,8 @@ object BiliSymbolResolver {
     private const val THEME_STORE_ACTIVITY = "tv.danmaku.bili.ui.theme.ThemeStoreActivity"
     private const val BILI_SKIN_LIST = "tv.danmaku.bili.ui.theme.api.BiliSkinList"
     private const val BILI_SKIN = "tv.danmaku.bili.ui.theme.api.BiliSkin"
+    // 播放页详情响应模型:进度条拖动图标(play_icon)挂载在 ViewReply.getPlayerIcon() 的返回对象上
+    private const val VIEW_REPLY_CLASS = "com.bapis.bilibili.app.view.v1.ViewReply"
     private const val STORY_VIDEO_FRAGMENT = "com.bilibili.video.story.StoryVideoFragment"
     private const val STORY_PAGER_PLAYER = "com.bilibili.video.story.player.StoryPagerPlayer"
     private const val STORY_FEED_RESPONSE = "com.bilibili.video.story.api.StoryFeedResponse"

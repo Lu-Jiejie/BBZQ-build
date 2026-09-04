@@ -147,7 +147,7 @@ data class BiliHookSymbols(
 }
 
 object DexKitRuleVersions {
-    const val CURRENT = 58
+    const val CURRENT = 59
 }
 
 data class HookPointStatus(
@@ -2001,21 +2001,64 @@ data class RestoredTripleSpeedSymbols(
 
 data class CustomSkinSymbols(
     val resolverMethod: MethodDescriptor,
+    // 皮肤响应模型符号:用于在 B 站解析 /x/resource/show/skin 时注入
+    // user_equip 与 load_equip(下拉刷新动画)。全部可选:
+    // 缺失时仅失去响应替换增强,皮肤文件应用与 resolver 替换依然工作。
+    val skinResponseClassName: String? = null,
+    val skinResponseUserGarbSetter: MethodDescriptor? = null,
+    val skinResponseLoadEquipSetter: MethodDescriptor? = null,
+    val skinResolveMethod: MethodDescriptor? = null,
+    // 播放页 playerIcon getter:用于注入进度条拖动图标(play_icon)。可选。
+    val playerIconGetter: MethodDescriptor? = null,
     val evidence: String,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("resolverMethod", resolverMethod.toJson())
+        .putOpt("skinResponseClassName", skinResponseClassName)
+        .putOpt("skinResponseUserGarbSetter", skinResponseUserGarbSetter?.toJson())
+        .putOpt("skinResponseLoadEquipSetter", skinResponseLoadEquipSetter?.toJson())
+        .putOpt("skinResolveMethod", skinResolveMethod?.toJson())
+        .putOpt("playerIconGetter", playerIconGetter?.toJson())
         .put("evidence", evidence)
 
-    fun restore(classLoader: ClassLoader): Method? = resolverMethod.restoreOptional(classLoader)
+    fun restore(classLoader: ClassLoader): RestoredCustomSkinSymbols? {
+        val resolver = resolverMethod.restoreOptional(classLoader) ?: return null
+        val skinResponseClass = skinResponseClassName?.let(classLoader::loadClassOrNull)
+        val userGarbSetter = skinResponseUserGarbSetter?.restoreOptional(classLoader)
+        val loadEquipSetter = skinResponseLoadEquipSetter?.restoreOptional(classLoader)
+        val skinResolveMethod = skinResolveMethod?.restoreOptional(classLoader)
+        val playerIconGetter = playerIconGetter?.restoreOptional(classLoader)
+        return RestoredCustomSkinSymbols(
+            resolverMethod = resolver,
+            skinResponseClass = skinResponseClass,
+            skinResponseUserGarbSetter = userGarbSetter,
+            skinResponseLoadEquipSetter = loadEquipSetter,
+            skinResolveMethod = skinResolveMethod,
+            playerIconGetter = playerIconGetter,
+        )
+    }
 
     companion object {
         fun fromJson(obj: JSONObject): CustomSkinSymbols = CustomSkinSymbols(
             resolverMethod = MethodDescriptor.fromJson(obj.getJSONObject("resolverMethod")),
+            skinResponseClassName = obj.optString("skinResponseClassName").takeIf { it.isNotBlank() },
+            skinResponseUserGarbSetter = obj.optJSONObject("skinResponseUserGarbSetter")?.let(MethodDescriptor::fromJson),
+            skinResponseLoadEquipSetter = obj.optJSONObject("skinResponseLoadEquipSetter")?.let(MethodDescriptor::fromJson),
+            skinResolveMethod = obj.optJSONObject("skinResolveMethod")?.let(MethodDescriptor::fromJson),
+            playerIconGetter = obj.optJSONObject("playerIconGetter")?.let(MethodDescriptor::fromJson),
             evidence = obj.optString("evidence", "-"),
         )
     }
 }
+
+data class RestoredCustomSkinSymbols(
+    val resolverMethod: Method,
+    val skinResponseClass: Class<*>?,
+    val skinResponseUserGarbSetter: Method?,
+    val skinResponseLoadEquipSetter: Method?,
+    val skinResolveMethod: Method?,
+    val playerIconGetter: Method?,
+)
 
 data class CustomThemeSymbols(
     val themeHelperClassName: String,
