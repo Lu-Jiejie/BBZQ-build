@@ -1063,22 +1063,21 @@ object BiliSymbolResolver {
                 .map { it.apply { isAccessible = true } }
         }.getOrDefault(emptyList())
 
-        // B 站 blkv 配置读取:与 BiliRoamingX BLKV fingerprint 同源——
-        // 找含 ".blkv" 字符串的方法(blkv 工厂),其声明类即 blkv 工具类,
-        // 再在这些类里找 getString(key, def) 供 hook。可选增强。
-        val loadEquipConfGetter = runCatching {
-            val blkvClasses = currentBridge.findMethod(
+        // B 站 blkv 工厂方法:与 BiliRoamingX BLKV fingerprint 同源——
+        // 含 ".blkv" 字符串、签名 (Context, String, Z, I) 返回 SharedPreferences。
+        // 反射调用它拿到 blkv 实例,直接 putString("garb_load_equip_conf", json),
+        // 复刻 B 站官方写入路径,替代"写不了 B 站私有 blkv 格式"的旧限制。可选增强。
+        val blkvPrefsFactory = runCatching {
+            currentBridge.findMethod(
                 FindMethod.create().matcher(MethodMatcher.create().usingStrings(".blkv")),
             ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
-                .map { it.declaringClass }
-                .distinct()
-            blkvClasses.asSequence()
-                .flatMap { it.declaredMethods.asSequence() }
                 .firstOrNull { method ->
-                    method.name == "getString" && method.parameterCount == 2 &&
-                        method.parameterTypes[0] == String::class.java &&
+                    method.parameterCount == 4 &&
+                        Context::class.java.isAssignableFrom(method.parameterTypes[0]) &&
                         method.parameterTypes[1] == String::class.java &&
-                        method.returnType == String::class.java
+                        method.parameterTypes[2] == Boolean::class.javaPrimitiveType &&
+                        method.parameterTypes[3] == Int::class.javaPrimitiveType &&
+                        method.returnType.name.contains("SharedPreferences")
                 }
                 ?.apply { isAccessible = true }
         }.getOrNull()
@@ -1106,14 +1105,14 @@ object BiliSymbolResolver {
             playerIconGetter = playerIconGetter?.let(MethodDescriptor::of),
             configPlayerIconGetter = configPlayerIconGetter?.let(MethodDescriptor::of),
             videoPlayerIconGetters = videoPlayerIconGetters.map(MethodDescriptor::of),
-            loadEquipConfGetter = loadEquipConfGetter?.let(MethodDescriptor::of),
+            blkvPrefsFactory = blkvPrefsFactory?.let(MethodDescriptor::of),
             evidence = "resolver=${resolverMethod.declaringClass.name}.${resolverMethod.name}" +
                 ",userGarb=${skinResponseUserGarbSetter != null}" +
                 ",loadEquip=${skinResponseLoadEquipSetter != null}" +
                 ",playerIcon=${playerIconGetter != null}" +
                 ",configPlayerIcon=${configPlayerIconGetter != null}" +
                 ",videoPlayerIcon=${videoPlayerIconGetters.size}" +
-                ",loadEquipConf=${loadEquipConfGetter != null}" +
+                ",blkvFactory=${blkvPrefsFactory != null}" +
                 ",loadingUrl=${loadingUrlOwners.joinToString("|")}" +
                 ",dragLeft=${dragLeftPngOwners.joinToString("|")}",
         )

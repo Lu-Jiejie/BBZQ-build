@@ -1,6 +1,7 @@
 package io.github.bbzq.feats.hook
 
 import android.app.AlertDialog
+import android.content.Intent
 import android.graphics.Color
 import android.util.SparseArray
 import android.view.View
@@ -47,7 +48,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                 // 这样即使颜色主题符号缺失,皮肤功能依然完整。
                 hookSkinResponse(skinSymbols)
                 hookPlayIcon(skinSymbols)
-                hookLoadEquipConf(skinSymbols)
+                applyLoadEquipConf(skinSymbols)
             }
             // Suppressing the reset also stops an already-equipped theme from overriding
             // the imported skin when MainActivity restores it on startup.
@@ -228,25 +229,38 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
     }
 
     /**
-     * 下拉刷新动画(load_equip)配置注入:
-     * B 站从 blkv 读取该配置(getString("garb_load_equip_conf"));
-     * 我们写不了 B 站私有 blkv 格式,改为 hook blkv 的 getString,
-     * 在读取该 key 时直接返回自制 load_equip JSON。可选增强。
+     * 下拉刷新动画(load_equip)配置写入:
+     * B 站 web 进程从 blkv 读 "garb_load_equip_conf" 才知道动画文件名(base64(loading_url))。
+     * 反射调用 B 站 blkv 工厂方法(签名 Context,String,Z,I 返回 SharedPreferences,
+     * 与 BiliRoamingX BLKV fingerprint 同源)拿到 blkv 实例,直接 putString 写入,
+     * 复刻 BiliRoamingX 的写入路径,替代"写不了 B 站私有 blkv 格式"的旧限制。
+     * 最后广播 LOAD_EQUIP_CHANGE 让 web 进程重读。可选增强。
      */
-    private fun hookLoadEquipConf(skinSymbols: RestoredCustomSkinSymbols) {
-        val loadEquipConfGetter = skinSymbols.loadEquipConfGetter ?: run {
-            log("Custom skin load equip conf hook skipped: blkv getString missing")
+    private fun applyLoadEquipConf(skinSymbols: RestoredCustomSkinSymbols) {
+        val factory = skinSymbols.blkvPrefsFactory ?: run {
+            log("Custom skin load equip conf skipped: blkv factory missing")
             return
         }
-        env.hookBefore(loadEquipConfGetter) { param ->
-            if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookBefore
-            // 只拦截 load_equip 配置 key,其余 blkv 读取不受影响
-            if (param.args.getOrNull(0) != LOAD_EQUIP_CONF_KEY) return@hookBefore
-            val loadEquip = customSkinConfig()?.optJSONObject("load_equip") ?: return@hookBefore
-            if (loadEquip.optString("loading_url").isBlank()) return@hookBefore
-            param.result = loadEquip.toString()
+        val root = customSkinConfig() ?: return
+        val loadEquip = root.optJSONObject("load_equip") ?: run {
+            log("Custom skin load equip conf skipped: no load_equip")
+            return
         }
-        log("Custom skin load equip conf hook installed: ${loadEquipConfGetter.declaringClass.name}.${loadEquipConfGetter.name}")
+        if (loadEquip.optString("loading_url").isBlank() || loadEquip.optLong("id") <= 0L) {
+            log("Custom skin load equip conf skipped: load_equip incomplete")
+            return
+        }
+        runCatching {
+            // BiliRoamingX 调用约定:blkvPrefsByName(context, name, multiProcess, 0)
+            val prefs = factory.invoke(null, env.hostContext, LOAD_EQUIP_CONF_PREFS_FILE, false, 0)
+                as android.content.SharedPreferences
+            prefs.edit().putString(LOAD_EQUIP_CONF_KEY, loadEquip.toString()).apply()
+            // 先写 blkv 再广播,web 进程收到广播后重读才能拿到新配置(与 BiliRoamingX 顺序一致)
+            env.hostContext.sendBroadcast(Intent("${env.packageName}.garb.LOAD_EQUIP_CHANGE"))
+            log("Custom skin load equip conf written: id=${loadEquip.optLong("id")} via ${factory.declaringClass.name}.${factory.name}")
+        }.onFailure {
+            log("Custom skin load equip conf write failed", it)
+        }
     }
 
     private fun customSkinConfig(): JSONObject? = runCatching {
@@ -294,12 +308,12 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
 
     /**
      * 下拉刷新动画(load_equip)由 web 进程渲染,该进程不跑完整皮肤流程,
-     * 这里单独安装配置读取 hook,让 web 进程也能拿到自制 load_equip。
+     * 这里单独确保 blkv 配置已写入,让 web 进程也能拿到自制 load_equip。
      */
     fun insertLoadEquipForWebProcess() {
         if (!ModuleSettings.isCustomSkinEnabled(prefs)) return
         val skinSymbols = env.symbols?.customSkin?.restore(classLoader) ?: return
-        hookLoadEquipConf(skinSymbols)
+        applyLoadEquipConf(skinSymbols)
     }
 
     private fun installThemeMaps(symbols: RestoredCustomThemeSymbols, primaryColor: Int) {
@@ -443,8 +457,9 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         private const val MAIN_ACTIVITY = "tv.danmaku.bili.MainActivityV2"
         // 播放页进度条拖动图标模型(protobuf 生成类):newBuilder().setDragLeftPng(url)...build()
         private const val PLAYER_ICON_CLASS = "com.bapis.bilibili.app.view.v1.PlayerIcon"
-        // B 站 blkv 存储下拉刷新动画配置的 key
+        // B 站 blkv 存储下拉刷新动画配置的 key,以及存储该配置的 blkv 文件名
         private const val LOAD_EQUIP_CONF_KEY = "garb_load_equip_conf"
+        private const val LOAD_EQUIP_CONF_PREFS_FILE = "instance.bili_preference"
 
         private fun generateColorArray(primaryColor: Int): IntArray {
             val colors = IntArray(4)
