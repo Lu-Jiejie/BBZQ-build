@@ -172,18 +172,12 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
     }
 
     private fun installThemeMaps(symbols: RestoredCustomThemeSymbols, primaryColor: Int) {
-        // 主题名映射与颜色数组解耦:即使名称映射缺失(可选增强),
-        // 颜色数组注入(putColorArray)依然必须执行。
         runCatching {
-            symbols.themeName?.let { nameField ->
-                @Suppress("UNCHECKED_CAST")
-                (nameField.get(null) as? MutableMap<String, Int>)?.apply {
-                    put("custom1", CUSTOM_THEME_ID1)
-                    put("custom2", CUSTOM_THEME_ID2)
-                }
+            @Suppress("UNCHECKED_CAST")
+            (symbols.themeName.get(null) as? MutableMap<String, Int>)?.apply {
+                put("custom1", CUSTOM_THEME_ID1)
+                put("custom2", CUSTOM_THEME_ID2)
             }
-        }.onFailure { log("CustomTheme name map injection failed", it) }
-        runCatching {
             putColorArray(symbols.themeHelperColorArray, primaryColor)
             buildTheme(primaryColor, symbols.themeColorsClass)?.let { theme ->
                 @Suppress("UNCHECKED_CAST")
@@ -192,7 +186,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                     put(CUSTOM_THEME_ID2.toLong(), theme)
                 }
             }
-        }.onFailure { log("CustomTheme color array injection failed", it) }
+        }.onFailure { log("CustomTheme map installation failed", it) }
     }
 
     private fun putColorArray(field: Field, primaryColor: Int) {
@@ -225,9 +219,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
     }
 
     private fun hookThemeClick(symbols: RestoredCustomThemeSymbols) {
-        // 点击监听类为可选增强:缺失时颜色注入/列表注入依然生效,仅无法点击改色。
-        val clickClass = symbols.themeListClickClass ?: return
-        val method = clickClass.allMethods().firstOrNull {
+        val method = symbols.themeListClickClass.allMethods().firstOrNull {
             it.name == "onClick" && it.parameterTypes.contentEquals(arrayOf(View::class.java))
         } ?: return
         env.hookBefore(method) { param ->

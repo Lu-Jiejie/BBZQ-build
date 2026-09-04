@@ -92,7 +92,7 @@ data class BiliHookSymbols(
         .putOpt("videoQuality", videoQuality?.toJson())
 
     companion object {
-        const val CACHE_SCHEMA_VERSION = 39
+        const val CACHE_SCHEMA_VERSION = 38
 
         fun fromJson(raw: String?): BiliHookSymbols? {
             if (raw.isNullOrBlank()) return null
@@ -147,9 +147,7 @@ data class BiliHookSymbols(
 }
 
 object DexKitRuleVersions {
-    // 扫描规则版本:每次修改 BiliSymbolResolver 的 dexkit 扫描规则都必须 +1,
-    // 否则设备会命中磁盘里旧的失败缓存,新逻辑不生效。
-    const val CURRENT = 62
+    const val CURRENT = 58
 }
 
 data class HookPointStatus(
@@ -2022,20 +2020,16 @@ data class CustomSkinSymbols(
 data class CustomThemeSymbols(
     val themeHelperClassName: String,
     val themeHelperColorArray: FieldDescriptor,
-    // 主题名映射为可选增强(列表显示名称用),缺失时颜色注入仍有效。
-    val themeNameClassName: String? = null,
-    val themeNameField: FieldDescriptor? = null,
+    val themeNameClassName: String,
+    val themeNameField: FieldDescriptor,
     val builtInThemesClassName: String? = null,
     val builtInThemesField: FieldDescriptor? = null,
     val themeColorsClassName: String? = null,
     val skinListMethod: MethodDescriptor,
-    // 点击改色对话框为可选增强,缺失时跳过 hookThemeClick 即可。
-    val themeListClickClassName: String? = null,
+    val themeListClickClassName: String,
     val skinClassName: String,
-    // 主题处理器/重置方法是可选增强(抑制启动时主题重置),混淆版本可能缺失,
-    // 因此允许为空;为空时 CustomThemeHook 跳过 suppressThemeReset 即可。
-    val themeProcessorClassName: String? = null,
-    val themeResetMethods: List<MethodDescriptor> = emptyList(),
+    val themeProcessorClassName: String,
+    val themeResetMethods: List<MethodDescriptor>,
     val themeIdHelperClassName: String? = null,
     val themeIdHelperColorId: FieldDescriptor? = null,
     val columnHelperClassName: String? = null,
@@ -2049,15 +2043,15 @@ data class CustomThemeSymbols(
     fun toJson(): JSONObject = JSONObject()
         .put("themeHelperClassName", themeHelperClassName)
         .put("themeHelperColorArray", themeHelperColorArray.toJson())
-        .putOpt("themeNameClassName", themeNameClassName)
-        .putOpt("themeNameField", themeNameField?.toJson())
+        .put("themeNameClassName", themeNameClassName)
+        .put("themeNameField", themeNameField.toJson())
         .putOpt("builtInThemesClassName", builtInThemesClassName)
         .putOpt("builtInThemesField", builtInThemesField?.toJson())
         .putOpt("themeColorsClassName", themeColorsClassName)
         .put("skinListMethod", skinListMethod.toJson())
-        .putOpt("themeListClickClassName", themeListClickClassName)
+        .put("themeListClickClassName", themeListClickClassName)
         .put("skinClassName", skinClassName)
-        .putOpt("themeProcessorClassName", themeProcessorClassName)
+        .put("themeProcessorClassName", themeProcessorClassName)
         .put("themeResetMethods", themeResetMethods.toJsonArray { it.toJson() })
         .putOpt("themeIdHelperClassName", themeIdHelperClassName)
         .putOpt("themeIdHelperColorId", themeIdHelperColorId?.toJson())
@@ -2071,19 +2065,17 @@ data class CustomThemeSymbols(
 
     fun restore(classLoader: ClassLoader): RestoredCustomThemeSymbols? {
         val themeHelperClass = classLoader.loadClassOrNull(themeHelperClassName) ?: return null
-        val themeNameClass = themeNameClassName?.let(classLoader::loadClassOrNull)
+        val themeNameClass = classLoader.loadClassOrNull(themeNameClassName) ?: return null
         val builtInThemesClass = builtInThemesClassName?.let(classLoader::loadClassOrNull)
         val themeColorsClass = themeColorsClassName?.let(classLoader::loadClassOrNull)
         val skinListMethod = skinListMethod.restoreOptional(classLoader) ?: return null
-        val themeListClickClass = themeListClickClassName?.let(classLoader::loadClassOrNull)
+        val themeListClickClass = classLoader.loadClassOrNull(themeListClickClassName) ?: return null
         val skinClass = classLoader.loadClassOrNull(skinClassName) ?: return null
-        // 处理器类与重置方法为可选增强:恢复失败只影响"启动时抑制主题重置",
-        // 不应因此让整个主题符号不可用(否则主色调注入与皮肤应用都会失效)。
-        val themeProcessorClass = themeProcessorClassName?.let(classLoader::loadClassOrNull)
+        val themeProcessorClass = classLoader.loadClassOrNull(themeProcessorClassName) ?: return null
         val colorArray = themeHelperColorArray.restore(themeHelperClass) ?: return null
-        val themeName = themeNameField?.let { descriptor -> themeNameClass?.let(descriptor::restore) }
+        val themeName = themeNameField.restore(themeNameClass) ?: return null
         val allThemes = builtInThemesField?.let { descriptor -> builtInThemesClass?.let(descriptor::restore) }
-        val resetMethods = themeResetMethods.restoreAll(classLoader).orEmpty()
+        val resetMethods = themeResetMethods.restoreAll(classLoader) ?: return null
         val themeIdHelper = themeIdHelperClassName?.let(classLoader::loadClassOrNull)
         val themeIdColorId = themeIdHelperColorId?.let { themeIdHelper?.let(it::restore) }
         val columnHelper = columnHelperClassName?.let(classLoader::loadClassOrNull)
@@ -2104,15 +2096,15 @@ data class CustomThemeSymbols(
         fun fromJson(obj: JSONObject): CustomThemeSymbols = CustomThemeSymbols(
             themeHelperClassName = obj.optString("themeHelperClassName"),
             themeHelperColorArray = FieldDescriptor.fromJson(obj.getJSONObject("themeHelperColorArray")),
-            themeNameClassName = obj.optString("themeNameClassName").takeIf { it.isNotBlank() },
-            themeNameField = obj.optJSONObject("themeNameField")?.let(FieldDescriptor::fromJson),
+            themeNameClassName = obj.optString("themeNameClassName"),
+            themeNameField = FieldDescriptor.fromJson(obj.getJSONObject("themeNameField")),
             builtInThemesClassName = obj.optString("builtInThemesClassName").takeIf { it.isNotBlank() },
             builtInThemesField = obj.optJSONObject("builtInThemesField")?.let(FieldDescriptor::fromJson),
             themeColorsClassName = obj.optString("themeColorsClassName").takeIf { it.isNotBlank() },
             skinListMethod = MethodDescriptor.fromJson(obj.getJSONObject("skinListMethod")),
-            themeListClickClassName = obj.optString("themeListClickClassName").takeIf { it.isNotBlank() },
+            themeListClickClassName = obj.optString("themeListClickClassName"),
             skinClassName = obj.optString("skinClassName"),
-            themeProcessorClassName = obj.optString("themeProcessorClassName").takeIf { it.isNotBlank() },
+            themeProcessorClassName = obj.optString("themeProcessorClassName"),
             themeResetMethods = obj.optJSONArray("themeResetMethods").toList { MethodDescriptor.fromJson(it) },
             themeIdHelperClassName = obj.optString("themeIdHelperClassName").takeIf { it.isNotBlank() },
             themeIdHelperColorId = obj.optJSONObject("themeIdHelperColorId")?.let(FieldDescriptor::fromJson),
@@ -2130,13 +2122,13 @@ data class CustomThemeSymbols(
 data class RestoredCustomThemeSymbols(
     val themeHelperClass: Class<*>,
     val themeHelperColorArray: Field,
-    val themeName: Field?,
+    val themeName: Field,
     val allThemes: Field?,
     val themeColorsClass: Class<*>?,
     val skinListMethod: Method,
-    val themeListClickClass: Class<*>?,
+    val themeListClickClass: Class<*>,
     val skinClass: Class<*>,
-    val themeProcessorClass: Class<*>?,
+    val themeProcessorClass: Class<*>,
     val themeResetMethods: List<Method>,
     val themeIdHelperClass: Class<*>?,
     val themeIdHelperColorId: Field?,

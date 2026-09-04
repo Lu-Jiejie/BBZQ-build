@@ -1023,112 +1023,53 @@ object BiliSymbolResolver {
         val skinClass = classLoader.loadClassOrNull(BILI_SKIN)
             ?: return SymbolScanResult.Missing("BiliSkin not found")
 
-        // Bilibili 每个版本都会混淆主题辅助类("theme_entries_last_key" 常量、方法签名、
-        // 字段泛型都可能变化,例如 9.10.0)。这里用分层回退定位主题色数组持有类,
-        // 而不是在第一次签名不匹配时就直接失败:
-        //   1. 命中字符串的方法 + 与其同名的静态 SparseArray 字段(旧版路径)
-        //   2. 命中字符串的方法所在类,任意静态 SparseArray 字段(容忍泛型被混淆剥离)
-        //   3. theme/garb/ui 包内任意声明静态 SparseArray 字段的类(最终兜底)
-        val colorArrayMethods = runCatching {
-            currentBridge.findMethod(
-                FindMethod.create().matcher(MethodMatcher.create().usingStrings("theme_entries_last_key")),
-            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
-        }.getOrDefault(emptyList())
-        var colorArrayScanNotes = "stringMethods=${colorArrayMethods.size}"
-        val colorArrayHolder = colorArrayMethods.asSequence()
-            .mapNotNull { method ->
-                val owner = method.declaringClass
-                // 1. 旧版路径:与字符串方法同名的静态 SparseArray 字段
-                owner.declaredFields.firstOrNull {
-                    it.name == method.name && it.type == SparseArray::class.java && Modifier.isStatic(it.modifiers)
-                }?.apply { isAccessible = true }?.let { owner to it }
-                    // 2. 同类的任意静态 SparseArray 字段(混淆后泛型可能被剥离,不再强制 int[])
-                    ?: owner.declaredFields.firstOrNull {
-                        Modifier.isStatic(it.modifiers) && it.type == SparseArray::class.java
-                    }?.apply { isAccessible = true }?.let { owner to it }
-            }.firstOrNull()
-            ?: run {
-                val fallback = findThemeColorArrayHolderBySparseArray(classLoader, bridge)
-                colorArrayScanNotes += fallback?.let { ";fallback=${it.first.name}" } ?: ";fallback=null"
-                fallback
+        val colorArrayMethod = currentBridge.findMethod(
+            FindMethod.create().matcher(MethodMatcher.create().usingStrings("theme_entries_last_key")),
+        ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+            .firstOrNull {
+                it.parameterTypes.contentEquals(arrayOf(Context::class.java)) &&
+                    it.returnType == Int::class.javaPrimitiveType
             }
-        val themeHelperClass = colorArrayHolder?.first
-            ?: return SymbolScanResult.Missing("theme color array method not found ($colorArrayScanNotes)")
-        val colorArrayField = colorArrayHolder.second
+            ?: return SymbolScanResult.Missing("theme color array method not found")
+        val themeHelperClass = colorArrayMethod.declaringClass
+        val colorArrayField = themeHelperClass.declaredFields.firstOrNull {
+            it.name == colorArrayMethod.name && it.type == SparseArray::class.java && Modifier.isStatic(it.modifiers)
+        }?.apply { isAccessible = true }
+            ?: return SymbolScanResult.Missing("theme color SparseArray not found")
 
-        // 主题颜色模型类(可选增强,用于构建 GarbThemeColors 实例)。
-        // 字符串 "GarbThemeColors(garb=" 在新版本可能被混淆改动,找不到时
-        // 仅失去内置主题条目注入,不影响颜色数组主链路,故包一层容错。
-        val themeColorsClass = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(ClassMatcher.create().usingStrings("GarbThemeColors(garb=")),
-            ).mapNotNull { classLoader.loadClassOrNull(it.name) }
-                .firstOrNull { type -> type.declaredConstructors.any { Modifier.isPrivate(it.modifiers) } }
-        }.getOrNull()
+        val themeColorsClass = currentBridge.findClass(
+            FindClass.create().matcher(ClassMatcher.create().usingStrings("GarbThemeColors(garb=")),
+        ).mapNotNull { classLoader.loadClassOrNull(it.name) }
+            .firstOrNull { type -> type.declaredConstructors.any { Modifier.isPrivate(it.modifiers) } }
 
-        // 皮肤/主题列表填充方法:主题列表 UI 加载时会调用它来填充列表。
-        // hookThemeList 实际只依赖"第一个参数对象带 mList(MutableList)字段",
-        // 所以 9.10.0 签名变化后按下列顺序回退,而不是在第一次不匹配时失败:
-        //   1. 旧签名 (BiliSkinList, boolean)
-        //   2. 单参数 (BiliSkinList)
-        //   3. (BiliSkinList, Boolean) 包装类型
-        //   4. 任意方法:第一个参数类型带 mList 字段(hookThemeList 的真实约束)
-        val skinListMethodCandidates = themeStoreActivity.declaredMethods.toList()
-        val skinListMethod = skinListMethodCandidates.firstOrNull {
+        val skinListMethod = themeStoreActivity.declaredMethods.firstOrNull {
             it.parameterTypes.size == 2 &&
                 it.parameterTypes[0] == skinListClass &&
                 it.parameterTypes[1] == Boolean::class.javaPrimitiveType
-        } ?: skinListMethodCandidates.firstOrNull {
-            it.parameterTypes.size == 1 && it.parameterTypes[0] == skinListClass
-        } ?: skinListMethodCandidates.firstOrNull {
-            it.parameterTypes.size == 2 &&
-                it.parameterTypes[0] == skinListClass &&
-                it.parameterTypes[1] == Boolean::class.javaObjectType
-        } ?: skinListMethodCandidates.firstOrNull { method ->
-            method.parameterTypes.firstOrNull()?.declaredFields?.any { it.name == "mList" } == true
         }?.apply { isAccessible = true }
-            ?: return SymbolScanResult.Missing(
-                "theme skin list method not found; methods=" +
-                    skinListMethodCandidates.joinToString("|") { it.toGenericString() },
-            )
+            ?: return SymbolScanResult.Missing("theme skin list method not found")
 
-        // 主题处理器类与主题重置方法:用于抑制 MAIN_ACTIVITY.onPostCreate 时
-        // B 站重新应用已装备主题(会覆盖我们注入的颜色/皮肤)。这是**可选增强**:
-        // 找不到时主色调注入(installThemeMaps)与皮肤应用依然工作,
-        // 只是可能被宿主启动时的主题重置覆盖,故缺失时不视为扫描失败。
-        val themeProcessorCandidates = runCatching {
-            findClassNamesByNameContains(bridge, listOf("tv.danmaku.bili.ui.theme"))
-                .mapNotNull(classLoader::loadClassOrNull)
-        }.getOrDefault(emptyList())
-        val themeProcessorClass = themeProcessorCandidates.firstOrNull { type ->
-            type.declaredFields.count { it.type == skinListClass } > 1
-        } ?: themeProcessorCandidates.firstOrNull { type ->
-            type.declaredFields.any { it.type == skinListClass }
-        } ?: themeProcessorCandidates.firstOrNull { type ->
-            type.declaredFields.any { it.type == List::class.java || it.type == ArrayList::class.java }
-        }
-        val themeResetMethods = themeProcessorClass?.declaredMethods.orEmpty().filter {
-            it.parameterCount == 0 && !Modifier.isStatic(it.modifiers)
+        val themeProcessorClass = findClassNamesByNameContains(bridge, listOf("tv.danmaku.bili.ui.theme"))
+            .mapNotNull(classLoader::loadClassOrNull)
+            .firstOrNull { type -> type.declaredFields.count { it.type == skinListClass } > 1 }
+            ?: return SymbolScanResult.Missing("theme processor class not found")
+        val themeResetMethods = themeProcessorClass.declaredMethods.filter {
+            it.parameterCount == 0 && it.modifiers == 0
         }.onEach { it.isAccessible = true }
-        // 处理器/重置方法找不到时不视为失败:主色调注入与皮肤应用仍可用,
-        // 仅失去"抑制启动时主题重置"这一增强;状态记录进 evidence 供排查。
-        val themeProcessorName = themeProcessorClass?.name ?: "null"
+        if (themeResetMethods.isEmpty()) {
+            return SymbolScanResult.Missing("theme reset methods not found")
+        }
 
-        // 主题列表点击监听:点击"自定义颜色"条目时弹输入框。
-        // 这是可选交互增强:找不到时颜色注入/列表注入依然工作,只是不能点击改色。
         val themeListClickClass = themeStoreActivity.declaredClasses.firstOrNull {
             it.interfaces.contains(View.OnClickListener::class.java)
-        } ?: themeStoreActivity.declaredClasses.firstOrNull { type ->
-            type.declaredMethods.any { it.name == "onClick" && it.parameterTypes.contentEquals(arrayOf(View::class.java)) }
-        }
+        } ?: return SymbolScanResult.Missing("theme list click listener not found")
 
-        // 主题名映射类(静态 Map 字段):用于在主题列表显示 "custom1/custom2" 名称。
-        // 同样是可选增强:缺失时颜色数组注入(putColorArray)依然生效,
-        // 只是列表里显示默认名;恢复阶段也不会因它导致整个符号不可用。
         val themeNameClass = findThemeNameClass(classLoader, currentBridge)
-        val themeNameField = themeNameClass?.declaredFields?.firstOrNull {
+            ?: return SymbolScanResult.Missing("theme name map class not found")
+        val themeNameField = themeNameClass.declaredFields.firstOrNull {
             it.type == Map::class.java && Modifier.isStatic(it.modifiers)
         }?.apply { isAccessible = true }
+            ?: return SymbolScanResult.Missing("theme name map field not found")
 
         val builtInThemeCandidate = findClassNamesByNameContains(bridge, listOf("theme", "garb"))
             .mapNotNull(classLoader::loadClassOrNull)
@@ -1165,17 +1106,17 @@ object BiliSymbolResolver {
         val symbols = CustomThemeSymbols(
             themeHelperClassName = themeHelperClass.name,
             themeHelperColorArray = FieldDescriptor.of(colorArrayField),
-            themeNameClassName = themeNameClass?.name,
-            themeNameField = themeNameField?.let(FieldDescriptor::of),
+            themeNameClassName = themeNameClass.name,
+            themeNameField = FieldDescriptor.of(themeNameField),
             builtInThemesClassName = builtInThemeCandidate?.first?.name,
             builtInThemesField = builtInThemeCandidate?.second?.let(FieldDescriptor::of),
             themeColorsClassName = themeColorsClass?.name,
             skinListMethod = MethodDescriptor.of(skinListMethod),
-            themeListClickClassName = themeListClickClass?.name,
+            themeListClickClassName = themeListClickClass.name,
             skinClassName = skinClass.name,
-            themeProcessorClassName = themeProcessorName.takeIf { it != "null" },
+            themeProcessorClassName = themeProcessorClass.name,
             themeResetMethods = themeResetMethods.map(MethodDescriptor::of),
-            evidence = "helper=${themeHelperClass.name},processor=$themeProcessorName,reset=${themeResetMethods.size},click=${themeListClickClass != null},name=${themeNameClass != null},builtIn=${builtInThemeCandidate != null}",
+            evidence = "helper=${themeHelperClass.name},processor=${themeProcessorClass.name},reset=${themeResetMethods.size},builtIn=${builtInThemeCandidate != null}",
             skinResponseClassName = skinResponseClass?.name,
             skinResponseUserGarbSetter = skinResponseUserGarbSetter?.let(MethodDescriptor::of),
             skinResponseLoadEquipSetter = skinResponseLoadEquipSetter?.let(MethodDescriptor::of),
@@ -1184,98 +1125,12 @@ object BiliSymbolResolver {
         return SymbolScanResult.Found(symbols, themeStoreActivity.name, symbols.evidence)
     }
 
-    /** True for `SparseArray<int[]>` fields, which is how Bilibili stores theme color arrays. */
-    private fun Field.isThemeColorArrayField(): Boolean {
-        if (!Modifier.isStatic(modifiers) || type != SparseArray::class.java) return false
-        return when (val generic = genericType) {
-            is ParameterizedType -> {
-                generic.actualTypeArguments.size == 1 && generic.actualTypeArguments[0] == IntArray::class.java
-            }
-            // 混淆可能剥离泛型签名,此时退化为普通 SparseArray 也可接受;
-            // 是否真的是颜色数组由调用方的包前缀约束兜底。
-            else -> true
-        }
-    }
-
-    private fun intArraySparseArrayField(type: Class<*>): Field? =
-        type.declaredFields.firstOrNull { it.isThemeColorArrayField() }?.apply { isAccessible = true }
-
-    /** 遍历类的直接字段与所有嵌套类(含深层)中的静态 SparseArray 字段。 */
-    private fun collectStaticSparseArrayFields(
-        type: Class<*>,
-        acceptAny: Boolean,
-    ): List<Pair<Class<*>, Field>> {
-        val visited = HashSet<Class<*>>()
-        val result = ArrayList<Pair<Class<*>, Field>>()
-        fun visit(t: Class<*>) {
-            if (!visited.add(t)) return
-            for (field in t.declaredFields) {
-                if (!Modifier.isStatic(field.modifiers) || field.type != SparseArray::class.java) continue
-                if (acceptAny || field.isThemeColorArrayField()) {
-                    runCatching { field.isAccessible = true }
-                    result += t to field
-                }
-            }
-            // 内部类里也可能持有主题色数组(例如 ThemeStoreActivity 的嵌套辅助类)
-            t.declaredClasses.forEach { visit(it) }
-        }
-        visit(type)
-        return result
-    }
-
-    /**
-     * 兜底定位主题色数组持有类:当 "theme_entries_last_key" 字符串扫描在较新版本
-     * 上落空时使用。优先搜 theme 包,其次 garb 包(9.10.0 起装扮/主题同域),
-     * 再扩大到 "tv.danmaku.bili.ui" 前缀与名称含 theme/garb 的类。
-     * 泛型被混淆剥离时接受任意静态 SparseArray;包前缀为 theme/garb/ui 时
-     * 放宽到任意静态 SparseArray,避免因泛型信息丢失而漏掉目标。
-     */
-    private fun findThemeColorArrayHolderBySparseArray(
-        classLoader: ClassLoader,
-        bridge: () -> DexKitBridge?,
-    ): Pair<Class<*>, Field>? {
-        val currentBridge = bridge() ?: return null
-        val terms = listOf(
-            "tv.danmaku.bili.ui.theme",
-            "tv.danmaku.bili.ui.garb",
-            "tv.danmaku.bili.ui",
-        )
-        val matches = terms.flatMap { term ->
-            runCatching {
-                currentBridge.findClass(
-                    FindClass.create().matcher(ClassMatcher.create().className(term, StringMatchType.Contains)),
-                ).map { it.name }.toList()
-            }.getOrElse { throwable ->
-                throw IllegalStateException("DexKit class name search failed term=$term: ${throwable.scanMessage()}", throwable)
-            }
-        }.distinct()
-        val prioritized = matches.sortedWith(
-            compareByDescending<String> { it.startsWith("tv.danmaku.bili.ui.theme.") }
-                .thenByDescending { it.startsWith("tv.danmaku.bili.ui.garb.") },
-        )
-        return prioritized.asSequence()
-            .mapNotNull(classLoader::loadClassOrNull)
-            .firstNotNullOfOrNull { type ->
-                // 强相关包(theme/garb)优先接受任意静态 SparseArray(泛型可能被剥离),
-                // 其它包只接受带 int[] 泛型签名的,降低误命中面。
-                val acceptAny = type.name.startsWith("tv.danmaku.bili.ui.theme.") ||
-                    type.name.startsWith("tv.danmaku.bili.ui.garb.")
-                collectStaticSparseArrayFields(type, acceptAny).firstOrNull()
-            }
-    }
-
-    /** 定位主题名映射类(静态 Map 字段),供 installThemeMaps 注入 "custom1/custom2"。 */
     private fun findThemeNameClass(classLoader: ClassLoader, bridge: DexKitBridge): Class<*>? {
-        // 搜索词覆盖多个版本:装扮变更广播字符串、以及主题逻辑里常见的常量。
-        // 找不到时返回 null,由调用方给出 missing 诊断。
-        val terms = listOf(".garb.GARB_CHANGE", "theme_entries_last_key", "white")
-        val candidates = terms.flatMap { term ->
-            runCatching {
-                bridge.findClass(
-                    FindClass.create().matcher(ClassMatcher.create().usingStrings(term)),
-                ).map { it.name }.toList()
-            }.getOrDefault(emptyList())
-        }
+        val candidates = bridge.findClass(
+            FindClass.create().matcher(ClassMatcher.create().usingStrings(".garb.GARB_CHANGE")),
+        ).map { it.name }.toList() + bridge.findClass(
+            FindClass.create().matcher(ClassMatcher.create().usingStrings("white")),
+        ).map { it.name }.toList()
         return candidates.asSequence().distinct().mapNotNull(classLoader::loadClassOrNull)
             .firstOrNull { type ->
                 type.declaredFields.any { Modifier.isStatic(it.modifiers) && it.type == Map::class.java }
