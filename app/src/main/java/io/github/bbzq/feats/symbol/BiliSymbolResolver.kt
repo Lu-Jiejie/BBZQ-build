@@ -1128,8 +1128,11 @@ object BiliSymbolResolver {
         }.getOrDefault(emptyList())
         // 诊断:load_equip 核心管理器(changeOwners/confOwners 双命中,如 ko1.j)的方法签名,
         // 看它读取配置、加载动画的真实方法,供下轮 hook 其读取边界。
-        val loadEquipManagerMethods = loadEquipChangeOwners.flatMap { owner ->
-            runCatching { classLoader.loadClassOrNull(owner)?.declaredMethods?.map(::sig) }.getOrDefault(emptyList())
+        val loadEquipManagerMethods: List<String> = ArrayList<String>().apply {
+            for (owner in loadEquipChangeOwners) {
+                val clazz = classLoader.loadClassOrNull(owner) ?: continue
+                for (method in clazz.declaredMethods) add(sig(method))
+            }
         }.distinct().take(15)
         // 诊断:所有含 "load_equip" 字符串的类(评论区/自动刷新组件可能读别的 key 或文件)。
         val loadEquipOwners = runCatching {
