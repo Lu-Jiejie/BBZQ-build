@@ -147,7 +147,7 @@ data class BiliHookSymbols(
 }
 
 object DexKitRuleVersions {
-    const val CURRENT = 68
+    const val CURRENT = 69
 }
 
 data class HookPointStatus(
@@ -2008,12 +2008,8 @@ data class CustomSkinSymbols(
     val skinResponseUserGarbSetter: MethodDescriptor? = null,
     val skinResponseLoadEquipSetter: MethodDescriptor? = null,
     val skinResolveMethod: MethodDescriptor? = null,
-    // 播放页 playerIcon getter:用于注入进度条拖动图标(play_icon)。可选。
-    val playerIconGetter: MethodDescriptor? = null,
-    // 新播放页接口(viewunite)的 playerIcon getter:同样注入 play_icon。可选。
-    val configPlayerIconGetter: MethodDescriptor? = null,
-    // 番剧播放页 JSON 模型的 play_icon getter(getDragLeftPng 等):
-    // 9.10.0 番剧走 kotlinx.serialization 反序列化,UI 通过这些 getter 读图标 URL。
+    // 播放页进度条图标(play_icon)的 URL getter(getDragLeftPng 等):
+    // 播放页 UI 从 PlayerIcon 模型读这三个 getter(左拉/右拉/不拉表现图)。
     val videoPlayerIconGetters: List<MethodDescriptor> = emptyList(),
     // B 站 blkv 工厂方法(签名 Context,String,Z,I 返回 SharedPrefX):
     // 反射调用它写入 garb_load_equip_conf,替代"写不了 B 站私有 blkv"的旧限制。可选。
@@ -2029,8 +2025,6 @@ data class CustomSkinSymbols(
         .putOpt("skinResponseUserGarbSetter", skinResponseUserGarbSetter?.toJson())
         .putOpt("skinResponseLoadEquipSetter", skinResponseLoadEquipSetter?.toJson())
         .putOpt("skinResolveMethod", skinResolveMethod?.toJson())
-        .putOpt("playerIconGetter", playerIconGetter?.toJson())
-        .putOpt("configPlayerIconGetter", configPlayerIconGetter?.toJson())
         .put("videoPlayerIconGetters", org.json.JSONArray(videoPlayerIconGetters.map { it.toJson() }))
         .putOpt("blkvPrefsFactory", blkvPrefsFactory?.toJson())
         .put("blkvGetMethods", org.json.JSONArray(blkvGetMethods.map { it.toJson() }))
@@ -2042,8 +2036,6 @@ data class CustomSkinSymbols(
         val userGarbSetter = skinResponseUserGarbSetter?.restoreOptional(classLoader)
         val loadEquipSetter = skinResponseLoadEquipSetter?.restoreOptional(classLoader)
         val skinResolveMethod = skinResolveMethod?.restoreOptional(classLoader)
-        val playerIconGetter = playerIconGetter?.restoreOptional(classLoader)
-        val configPlayerIconGetter = configPlayerIconGetter?.restoreOptional(classLoader)
         val videoPlayerIconGetters = videoPlayerIconGetters.mapNotNull { it.restoreOptional(classLoader) }
         val blkvPrefsFactory = blkvPrefsFactory?.restoreOptional(classLoader)
         val blkvGetMethods = blkvGetMethods.mapNotNull { it.restoreOptional(classLoader) }
@@ -2053,8 +2045,6 @@ data class CustomSkinSymbols(
             skinResponseUserGarbSetter = userGarbSetter,
             skinResponseLoadEquipSetter = loadEquipSetter,
             skinResolveMethod = skinResolveMethod,
-            playerIconGetter = playerIconGetter,
-            configPlayerIconGetter = configPlayerIconGetter,
             videoPlayerIconGetters = videoPlayerIconGetters,
             blkvPrefsFactory = blkvPrefsFactory,
             blkvGetMethods = blkvGetMethods,
@@ -2068,8 +2058,6 @@ data class CustomSkinSymbols(
             skinResponseUserGarbSetter = obj.optJSONObject("skinResponseUserGarbSetter")?.let(MethodDescriptor::fromJson),
             skinResponseLoadEquipSetter = obj.optJSONObject("skinResponseLoadEquipSetter")?.let(MethodDescriptor::fromJson),
             skinResolveMethod = obj.optJSONObject("skinResolveMethod")?.let(MethodDescriptor::fromJson),
-            playerIconGetter = obj.optJSONObject("playerIconGetter")?.let(MethodDescriptor::fromJson),
-            configPlayerIconGetter = obj.optJSONObject("configPlayerIconGetter")?.let(MethodDescriptor::fromJson),
             videoPlayerIconGetters = obj.optJSONArray("videoPlayerIconGetters")?.let { arr ->
                 (0 until arr.length()).mapNotNull { i ->
                     arr.optJSONObject(i)?.let(MethodDescriptor::fromJson)
@@ -2092,8 +2080,6 @@ data class RestoredCustomSkinSymbols(
     val skinResponseUserGarbSetter: Method?,
     val skinResponseLoadEquipSetter: Method?,
     val skinResolveMethod: Method?,
-    val playerIconGetter: Method?,
-    val configPlayerIconGetter: Method?,
     val videoPlayerIconGetters: List<Method>,
     val blkvPrefsFactory: Method?,
     val blkvGetMethods: List<Method>,

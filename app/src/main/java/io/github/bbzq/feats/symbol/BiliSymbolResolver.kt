@@ -1033,32 +1033,22 @@ object BiliSymbolResolver {
                 ?.apply { isAccessible = true }
         }.getOrNull()
 
-        // 播放页 playerIcon getter:进度条拖动图标(play_icon)挂载在
-        // ViewReply.getPlayerIcon() 的返回对象上。用方法名全 dex 扫描,
-        // 兼容旧接口(app.view.v1)与新接口(viewunite 的 Config)。
-        // 注意过滤抽象方法(接口方法无法 hook)。可选增强。
-        val playerIconGetters = runCatching {
-            currentBridge.findMethod(
-                FindMethod.create().matcher(MethodMatcher.create().name("getPlayerIcon")),
-            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
-                .filter { it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers) && !it.declaringClass.isInterface }
-                .distinctBy { it.declaringClass.name }
-                .map { it.apply { isAccessible = true } }
-        }.getOrDefault(emptyList())
-        val playerIconGetter = playerIconGetters.firstOrNull { it.declaringClass.name == VIEW_REPLY_CLASS }
-        val configPlayerIconGetter = playerIconGetters.firstOrNull { it.declaringClass.name != VIEW_REPLY_CLASS }
-
-        // 播放页进度条图标(play_icon)的 URL 与类型 getter:
-        // UGC 视频播放页从 PlayerIcon 对象读 getDragLeftPng/getDragRightPng/getMiddlePng,
-        // 对应自制主题的 drag_left_png/drag_right_png/middle_png。
-        // 三个 URL 都要 hook——B 站 UI 可能以 middle_png(不拉状态)为空判定整个图标不渲染;
-        // getGoodsType 用于判断图标类型(dlc),B 站 UI 可能据此决定是否显示。
+        // 播放页进度条图标(play_icon)的 URL getter:
+        // 播放页 UI 从 PlayerIcon 模型(getDragLeftPng/getDragRightPng/getMiddlePng)
+        // 读取左拉/右拉/不拉三种状态的表现图。用类名限定 PlayerIcon 精确命中
+        // protobuf PlayerIcon 与番剧 JSON 模型(VideoPlayerIcon_JsonDescriptor),
+        // 避免全 dex 方法名扫描误伤 Description 等无关类。可选增强。
         val videoPlayerIconGetters = runCatching {
-            listOf("getDragLeftPng", "getDragRightPng", "getMiddlePng", "getGoodsType").flatMap { methodName ->
+            listOf("getDragLeftPng", "getDragRightPng", "getMiddlePng").flatMap { methodName ->
                 currentBridge.findMethod(
                     FindMethod.create().matcher(MethodMatcher.create().name(methodName)),
                 ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
-                    .filter { it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers) && !it.declaringClass.isInterface }
+                    .filter { method ->
+                        method.parameterCount == 0 &&
+                            !Modifier.isAbstract(method.modifiers) &&
+                            !method.declaringClass.isInterface &&
+                            method.declaringClass.name.contains("PlayerIcon")
+                    }
             }.distinctBy { "${it.declaringClass.name}.${it.name}" }
                 .map { it.apply { isAccessible = true } }
         }.getOrDefault(emptyList())
@@ -1167,16 +1157,12 @@ object BiliSymbolResolver {
             skinResponseUserGarbSetter = skinResponseUserGarbSetter?.let(MethodDescriptor::of),
             skinResponseLoadEquipSetter = skinResponseLoadEquipSetter?.let(MethodDescriptor::of),
             skinResolveMethod = skinResolveMethod?.let(MethodDescriptor::of),
-            playerIconGetter = playerIconGetter?.let(MethodDescriptor::of),
-            configPlayerIconGetter = configPlayerIconGetter?.let(MethodDescriptor::of),
             videoPlayerIconGetters = videoPlayerIconGetters.map(MethodDescriptor::of),
             blkvPrefsFactory = blkvPrefsFactory?.let(MethodDescriptor::of),
             blkvGetMethods = blkvGetMethods.map(MethodDescriptor::of),
             evidence = "resolver=${resolverMethod.declaringClass.name}.${resolverMethod.name}" +
                 ",userGarb=${skinResponseUserGarbSetter != null}" +
                 ",loadEquip=${skinResponseLoadEquipSetter != null}" +
-                ",playerIcon=${playerIconGetter != null}" +
-                ",configPlayerIcon=${configPlayerIconGetter != null}" +
                 ",videoPlayerIcon=${videoPlayerIconGetters.size}" +
                 ",blkvFactory=${blkvPrefsFactory != null}" +
                 ",blkvGets=${blkvGetMethods.size}" +
@@ -4320,11 +4306,6 @@ object BiliSymbolResolver {
     private const val THEME_STORE_ACTIVITY = "tv.danmaku.bili.ui.theme.ThemeStoreActivity"
     private const val BILI_SKIN_LIST = "tv.danmaku.bili.ui.theme.api.BiliSkinList"
     private const val BILI_SKIN = "tv.danmaku.bili.ui.theme.api.BiliSkin"
-    // 播放页详情响应模型:进度条拖动图标(play_icon)挂载在 ViewReply.getPlayerIcon() 的返回对象上
-    private const val VIEW_REPLY_CLASS = "com.bapis.bilibili.app.view.v1.ViewReply"
-    // 新播放页接口(viewunite)的 play_icon 挂在 ViewBase.config(Config.playerIcon)上;
-    // 该路径随版本可能混淆,实际扫描按方法名 getPlayerIcon 全 dex 匹配,这里仅作参考
-    private const val VIEW_UNITE_CONFIG_CLASS = "com.bapis.bilibili.app.viewunite.common.Config"
     private const val STORY_VIDEO_FRAGMENT = "com.bilibili.video.story.StoryVideoFragment"
     private const val STORY_PAGER_PLAYER = "com.bilibili.video.story.player.StoryPagerPlayer"
     private const val STORY_FEED_RESPONSE = "com.bilibili.video.story.api.StoryFeedResponse"

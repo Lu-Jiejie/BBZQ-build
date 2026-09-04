@@ -31,6 +31,10 @@ import java.lang.reflect.Modifier
  * BiliRoaming while keeping all settings in BBZQ's remote preferences.
  */
 class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
+    // play_icon 配置缓存:以原始 JSON 字符串为指纹,皮肤切换时自动失效重解析
+    private var cachedSkinRaw: String? = null
+    private var cachedPlayIconConfig: JSONObject? = null
+
     override fun startHook() {
         val customSkinEnabled = ModuleSettings.isCustomSkinEnabled(prefs)
         // A portable garb contains its own colors. It must win over this module's
@@ -133,100 +137,41 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
 
     /**
      * 播放页进度条拖动图标(play_icon)注入:
-     * 自制主题 JSON 里的 drag_left_png / drag_right_png / middle_png
-     * 是进度条控件左拉、右拉、不拉三种状态的表现图。挂载点分两类:
-     * 1) protobuf 模型(ViewReply.getPlayerIcon / Config.getPlayerIcon),返回 PlayerIcon 对象;
-     * 2) 番剧详情 JSON 模型(getDragLeftPng 等,9.10.0 走 kotlinx.serialization),返回 URL 字符串。
-     * 两类统一注入。可选增强。
+     * 自制主题 JSON 的 drag_left_png / drag_right_png / middle_png
+     * 是进度条控件左拉、右拉、不拉三种状态的表现图。播放页 UI 从
+     * PlayerIcon 模型读这三个 getter(返回 URL 字符串),直接替换返回值即可。
+     * 可选增强。
      */
     private fun hookPlayIcon(skinSymbols: RestoredCustomSkinSymbols) {
-        val protobufGetters = listOfNotNull(skinSymbols.playerIconGetter, skinSymbols.configPlayerIconGetter)
-        if (protobufGetters.isEmpty() && skinSymbols.videoPlayerIconGetters.isEmpty()) {
+        if (skinSymbols.videoPlayerIconGetters.isEmpty()) {
             log("Custom skin play icon hook skipped: playerIcon getters missing")
             return
         }
-        protobufGetters.forEach { getter ->
-            env.hookAfter(getter) { param ->
-                if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
-                val playIcon = customSkinConfig()?.optJSONObject("play_icon") ?: return@hookAfter
-                if (playIcon.optString("drag_left_png").isBlank() &&
-                    playIcon.optString("drag_right_png").isBlank() &&
-                    playIcon.optString("middle_png").isBlank()
-                ) return@hookAfter
-                val built = buildPlayerIcon(playIcon)
-                if (built != null) {
-                    param.result = built
-                    log("Custom skin play icon injected at ${getter.declaringClass.name}.${getter.name}")
-                }
-            }
-            log("Custom skin play icon hook installed: ${getter.declaringClass.name}.${getter.name}")
-        }
-        // 播放页 PlayerIcon getter:getDragLeftPng 等返回 URL 字符串直接替换,
-        // getGoodsType 返回图标类型(dlc),B 站 UI 可能据此判断是否显示。
-        // UGC 视频播放页的 PlayerIcon getter 也走这里。
         skinSymbols.videoPlayerIconGetters.forEach { getter ->
             env.hookAfter(getter) { param ->
                 if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
-                val playIcon = customSkinConfig()?.optJSONObject("play_icon") ?: return@hookAfter
+                val playIcon = playIconConfig() ?: return@hookAfter
                 val url = when (getter.name) {
                     "getDragLeftPng" -> playIcon.optString("drag_left_png")
                     "getDragRightPng" -> playIcon.optString("drag_right_png")
                     "getMiddlePng" -> playIcon.optString("middle_png")
-                    "getGoodsType" -> playIcon.optString("goods_type")
                     else -> return@hookAfter
                 }
-                if (url.isNotBlank()) {
-                    param.result = url
-                    log("Custom skin play icon url injected at ${getter.declaringClass.name}.${getter.name}")
-                }
+                if (url.isNotBlank()) param.result = url
             }
-            log("Custom skin video player icon hook installed: ${getter.declaringClass.name}.${getter.name}")
+            log("Custom skin play icon hook installed: ${getter.declaringClass.name}.${getter.name}")
         }
     }
 
-    /**
-     * 通过反射构造 B 站 PlayerIcon 对象:
-     * 优先 newBuilder()(protobuf-lite 标准,构造器私有),失败则回退无参构造(可变消息类)。
-     * 设置所有可用字段(drag_left_png/drag_right_png/middle_png/squared_image/
-     * static_icon_image/goods_type/ver/id)——9.10.0 可能校验这些字段非空才渲染。
-     * 失败不再静默,打日志便于定位。
-     */
-    private fun buildPlayerIcon(playIcon: JSONObject): Any? {
-        return runCatching {
-            val playerIconClass = classLoader.loadClass(PLAYER_ICON_CLASS)
-            val builder = runCatching { playerIconClass.getMethod("newBuilder").invoke(null) }.getOrNull()
-            val icon = builder ?: playerIconClass.getConstructor().newInstance()
-
-            fun setString(name: String, value: String) {
-                if (value.isBlank()) return
-                runCatching { icon.javaClass.getMethod(name, String::class.java).invoke(icon, value) }
-                    .onFailure { log("Custom skin play icon setter $name failed: ${it.message}") }
-            }
-            fun setLong(name: String, value: String) {
-                val v = value.toLongOrNull() ?: return
-                runCatching { icon.javaClass.getMethod(name, Long::class.javaPrimitiveType).invoke(icon, v) }
-                    .getOrNull() ?: runCatching {
-                    icon.javaClass.getMethod(name, java.lang.Long::class.java).invoke(icon, v)
-                }.onFailure { log("Custom skin play icon setter $name failed: ${it.message}") }
-            }
-
-            setString("setDragLeftPng", playIcon.optString("drag_left_png"))
-            setString("setDragRightPng", playIcon.optString("drag_right_png"))
-            setString("setMiddlePng", playIcon.optString("middle_png"))
-            setString("setSquaredImage", playIcon.optString("squared_image"))
-            setString("setStaticIconImage", playIcon.optString("static_icon_image"))
-            setString("setGoodsType", playIcon.optString("goods_type"))
-            setLong("setVer", playIcon.optString("ver"))
-            setLong("setId", playIcon.optString("id"))
-
-            if (builder != null) {
-                icon.javaClass.getMethod("build").invoke(icon)
-            } else {
-                icon
-            }
-        }.onFailure {
-            log("Custom skin buildPlayerIcon failed: ${it.message}", it)
-        }.getOrNull()
+    /** 自制皮肤 play_icon 配置:按 raw 指纹缓存解析结果,皮肤切换时自动失效重解析。 */
+    private fun playIconConfig(): JSONObject? {
+        val raw = ModuleSettings.getCustomSkinJson(prefs)
+        if (raw.isBlank()) return null
+        if (cachedSkinRaw != raw) {
+            cachedSkinRaw = raw
+            cachedPlayIconConfig = runCatching { JSONObject(raw).optJSONObject("play_icon") }.getOrNull()
+        }
+        return cachedPlayIconConfig
     }
 
     /**
@@ -528,8 +473,6 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         private const val CUSTOM_THEME_ID1 = 114514
         private const val CUSTOM_THEME_ID2 = 1919810
         private const val MAIN_ACTIVITY = "tv.danmaku.bili.MainActivityV2"
-        // 播放页进度条拖动图标模型(protobuf 生成类):newBuilder().setDragLeftPng(url)...build()
-        private const val PLAYER_ICON_CLASS = "com.bapis.bilibili.app.view.v1.PlayerIcon"
         // B 站 blkv 存储下拉刷新动画配置的 key,以及存储该配置的 blkv 文件名
         private const val LOAD_EQUIP_CONF_KEY = "garb_load_equip_conf"
         private const val LOAD_EQUIP_CONF_PREFS_FILE = "instance.bili_preference"
