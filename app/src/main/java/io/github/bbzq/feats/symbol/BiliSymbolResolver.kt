@@ -1056,10 +1056,15 @@ object BiliSymbolResolver {
             ?: return SymbolScanResult.Missing("theme color array method not found ($colorArrayScanNotes)")
         val colorArrayField = colorArrayHolder.second
 
-        val themeColorsClass = currentBridge.findClass(
-            FindClass.create().matcher(ClassMatcher.create().usingStrings("GarbThemeColors(garb=")),
-        ).mapNotNull { classLoader.loadClassOrNull(it.name) }
-            .firstOrNull { type -> type.declaredConstructors.any { Modifier.isPrivate(it.modifiers) } }
+        // 主题颜色模型类(可选增强,用于构建 GarbThemeColors 实例)。
+        // 字符串 "GarbThemeColors(garb=" 在新版本可能被混淆改动,找不到时
+        // 仅失去内置主题条目注入,不影响颜色数组主链路,故包一层容错。
+        val themeColorsClass = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("GarbThemeColors(garb=")),
+            ).mapNotNull { classLoader.loadClassOrNull(it.name) }
+                .firstOrNull { type -> type.declaredConstructors.any { Modifier.isPrivate(it.modifiers) } }
+        }.getOrNull()
 
         // 皮肤/主题列表填充方法:主题列表 UI 加载时会调用它来填充列表。
         // hookThemeList 实际只依赖"第一个参数对象带 mList(MutableList)字段",
@@ -1087,45 +1092,43 @@ object BiliSymbolResolver {
                     skinListMethodCandidates.joinToString("|") { it.toGenericString() },
             )
 
-        // 主题处理器类:持有皮肤列表字段、且重置主题的方法所在类。
-        // 混淆版本可能把 BiliSkinList 字段改成 List/其它类型,按序回退:
-        //   1. theme 包内 BiliSkinList 字段 > 1 的类(旧路径)
-        //   2. theme 包内 BiliSkinList 字段 >= 1 的类
-        //   3. theme 包内任意 List 字段的类
-        val themeProcessorCandidates = findClassNamesByNameContains(bridge, listOf("tv.danmaku.bili.ui.theme"))
-            .mapNotNull(classLoader::loadClassOrNull)
+        // 主题处理器类与主题重置方法:用于抑制 MAIN_ACTIVITY.onPostCreate 时
+        // B 站重新应用已装备主题(会覆盖我们注入的颜色/皮肤)。这是**可选增强**:
+        // 找不到时主色调注入(installThemeMaps)与皮肤应用依然工作,
+        // 只是可能被宿主启动时的主题重置覆盖,故缺失时不视为扫描失败。
+        val themeProcessorCandidates = runCatching {
+            findClassNamesByNameContains(bridge, listOf("tv.danmaku.bili.ui.theme"))
+                .mapNotNull(classLoader::loadClassOrNull)
+        }.getOrDefault(emptyList())
         val themeProcessorClass = themeProcessorCandidates.firstOrNull { type ->
             type.declaredFields.count { it.type == skinListClass } > 1
         } ?: themeProcessorCandidates.firstOrNull { type ->
             type.declaredFields.any { it.type == skinListClass }
         } ?: themeProcessorCandidates.firstOrNull { type ->
             type.declaredFields.any { it.type == List::class.java || it.type == ArrayList::class.java }
-        } ?: return SymbolScanResult.Missing("theme processor class not found")
-
-        // 主题重置方法:MAIN_ACTIVITY.onPostCreate 时 B 站会重新应用主题,
-        // suppressThemeReset 仅在该调用栈上替换它。旧规则要求包私有(modifiers==0),
-        // 混淆后通常是 public,故只要求"无参非静态"。
-        val themeResetMethods = themeProcessorClass.declaredMethods.filter {
+        }
+        val themeResetMethods = themeProcessorClass?.declaredMethods.orEmpty().filter {
             it.parameterCount == 0 && !Modifier.isStatic(it.modifiers)
         }.onEach { it.isAccessible = true }
-        if (themeResetMethods.isEmpty()) {
-            return SymbolScanResult.Missing("theme reset methods not found")
-        }
+        // 处理器/重置方法找不到时不视为失败:主色调注入与皮肤应用仍可用,
+        // 仅失去"抑制启动时主题重置"这一增强;状态记录进 evidence 供排查。
+        val themeProcessorName = themeProcessorClass?.name ?: "null"
 
         // 主题列表点击监听:点击"自定义颜色"条目时弹输入框。
-        // 9.10.0 可能改用 lambda/别的接口,退化为"有 onClick(View) 方法的内部类"。
+        // 这是可选交互增强:找不到时颜色注入/列表注入依然工作,只是不能点击改色。
         val themeListClickClass = themeStoreActivity.declaredClasses.firstOrNull {
             it.interfaces.contains(View.OnClickListener::class.java)
         } ?: themeStoreActivity.declaredClasses.firstOrNull { type ->
             type.declaredMethods.any { it.name == "onClick" && it.parameterTypes.contentEquals(arrayOf(View::class.java)) }
-        } ?: return SymbolScanResult.Missing("theme list click listener not found")
+        }
 
+        // 主题名映射类(静态 Map 字段):用于在主题列表显示 "custom1/custom2" 名称。
+        // 同样是可选增强:缺失时颜色数组注入(putColorArray)依然生效,
+        // 只是列表里显示默认名;恢复阶段也不会因它导致整个符号不可用。
         val themeNameClass = findThemeNameClass(classLoader, currentBridge)
-            ?: return SymbolScanResult.Missing("theme name map class not found")
-        val themeNameField = themeNameClass.declaredFields.firstOrNull {
+        val themeNameField = themeNameClass?.declaredFields?.firstOrNull {
             it.type == Map::class.java && Modifier.isStatic(it.modifiers)
         }?.apply { isAccessible = true }
-            ?: return SymbolScanResult.Missing("theme name map field not found")
 
         val builtInThemeCandidate = findClassNamesByNameContains(bridge, listOf("theme", "garb"))
             .mapNotNull(classLoader::loadClassOrNull)
@@ -1162,17 +1165,17 @@ object BiliSymbolResolver {
         val symbols = CustomThemeSymbols(
             themeHelperClassName = themeHelperClass.name,
             themeHelperColorArray = FieldDescriptor.of(colorArrayField),
-            themeNameClassName = themeNameClass.name,
-            themeNameField = FieldDescriptor.of(themeNameField),
+            themeNameClassName = themeNameClass?.name,
+            themeNameField = themeNameField?.let(FieldDescriptor::of),
             builtInThemesClassName = builtInThemeCandidate?.first?.name,
             builtInThemesField = builtInThemeCandidate?.second?.let(FieldDescriptor::of),
             themeColorsClassName = themeColorsClass?.name,
             skinListMethod = MethodDescriptor.of(skinListMethod),
-            themeListClickClassName = themeListClickClass.name,
+            themeListClickClassName = themeListClickClass?.name,
             skinClassName = skinClass.name,
-            themeProcessorClassName = themeProcessorClass.name,
+            themeProcessorClassName = themeProcessorName.takeIf { it != "null" },
             themeResetMethods = themeResetMethods.map(MethodDescriptor::of),
-            evidence = "helper=${themeHelperClass.name},processor=${themeProcessorClass.name},reset=${themeResetMethods.size},builtIn=${builtInThemeCandidate != null}",
+            evidence = "helper=${themeHelperClass.name},processor=$themeProcessorName,reset=${themeResetMethods.size},click=${themeListClickClass != null},name=${themeNameClass != null},builtIn=${builtInThemeCandidate != null}",
             skinResponseClassName = skinResponseClass?.name,
             skinResponseUserGarbSetter = skinResponseUserGarbSetter?.let(MethodDescriptor::of),
             skinResponseLoadEquipSetter = skinResponseLoadEquipSetter?.let(MethodDescriptor::of),
