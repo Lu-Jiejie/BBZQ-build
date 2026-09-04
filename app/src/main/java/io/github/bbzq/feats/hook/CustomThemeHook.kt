@@ -151,12 +151,16 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                     playIcon.optString("drag_right_png").isBlank() &&
                     playIcon.optString("middle_png").isBlank()
                 ) return@hookAfter
-                buildPlayerIcon(playIcon)?.let { param.result = it }
+                val built = buildPlayerIcon(playIcon)
+                if (built != null) {
+                    param.result = built
+                    log("Custom skin play icon injected at ${getter.declaringClass.name}.${getter.name}")
+                }
             }
             log("Custom skin play icon hook installed: ${getter.declaringClass.name}.${getter.name}")
         }
         // 番剧 JSON 模型:getDragLeftPng/getDragRightPng/getMiddlePng 返回 URL 字符串,
-        // 直接替换返回值即可。
+        // 直接替换返回值即可。UGC 视频播放页的 PlayerIcon getter 也走这里。
         skinSymbols.videoPlayerIconGetters.forEach { getter ->
             env.hookAfter(getter) { param ->
                 if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
@@ -167,7 +171,10 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                     "getMiddlePng" -> playIcon.optString("middle_png")
                     else -> return@hookAfter
                 }
-                if (url.isNotBlank()) param.result = url
+                if (url.isNotBlank()) {
+                    param.result = url
+                    log("Custom skin play icon url injected at ${getter.declaringClass.name}.${getter.name}")
+                }
             }
             log("Custom skin video player icon hook installed: ${getter.declaringClass.name}.${getter.name}")
         }
@@ -176,6 +183,8 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
     /**
      * 通过反射构造 B 站 PlayerIcon 对象:
      * 优先 newBuilder()(protobuf-lite 标准,构造器私有),失败则回退无参构造(可变消息类)。
+     * 设置所有可用字段(drag_left_png/drag_right_png/middle_png/squared_image/
+     * static_icon_image/goods_type/ver/id)——9.10.0 可能校验这些字段非空才渲染。
      * 失败不再静默,打日志便于定位。
      */
     private fun buildPlayerIcon(playIcon: JSONObject): Any? {
@@ -183,15 +192,29 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             val playerIconClass = classLoader.loadClass(PLAYER_ICON_CLASS)
             val builder = runCatching { playerIconClass.getMethod("newBuilder").invoke(null) }.getOrNull()
             val icon = builder ?: playerIconClass.getConstructor().newInstance()
-            playIcon.optString("drag_left_png").takeIf { it.isNotBlank() }?.let {
-                icon.javaClass.getMethod("setDragLeftPng", String::class.java).invoke(icon, it)
+
+            fun setString(name: String, value: String) {
+                if (value.isBlank()) return
+                runCatching { icon.javaClass.getMethod(name, String::class.java).invoke(icon, value) }
+                    .onFailure { log("Custom skin play icon setter $name failed: ${it.message}") }
             }
-            playIcon.optString("drag_right_png").takeIf { it.isNotBlank() }?.let {
-                icon.javaClass.getMethod("setDragRightPng", String::class.java).invoke(icon, it)
+            fun setLong(name: String, value: String) {
+                val v = value.toLongOrNull() ?: return
+                runCatching { icon.javaClass.getMethod(name, Long::class.javaPrimitiveType).invoke(icon, v) }
+                    .getOrNull() ?: runCatching {
+                    icon.javaClass.getMethod(name, java.lang.Long::class.java).invoke(icon, v)
+                }.onFailure { log("Custom skin play icon setter $name failed: ${it.message}") }
             }
-            playIcon.optString("middle_png").takeIf { it.isNotBlank() }?.let {
-                icon.javaClass.getMethod("setMiddlePng", String::class.java).invoke(icon, it)
-            }
+
+            setString("setDragLeftPng", playIcon.optString("drag_left_png"))
+            setString("setDragRightPng", playIcon.optString("drag_right_png"))
+            setString("setMiddlePng", playIcon.optString("middle_png"))
+            setString("setSquaredImage", playIcon.optString("squared_image"))
+            setString("setStaticIconImage", playIcon.optString("static_icon_image"))
+            setString("setGoodsType", playIcon.optString("goods_type"))
+            setLong("setVer", playIcon.optString("ver"))
+            setLong("setId", playIcon.optString("id"))
+
             if (builder != null) {
                 icon.javaClass.getMethod("build").invoke(icon)
             } else {
