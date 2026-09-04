@@ -159,8 +159,9 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             }
             log("Custom skin play icon hook installed: ${getter.declaringClass.name}.${getter.name}")
         }
-        // 番剧 JSON 模型:getDragLeftPng/getDragRightPng/getMiddlePng 返回 URL 字符串,
-        // 直接替换返回值即可。UGC 视频播放页的 PlayerIcon getter 也走这里。
+        // 播放页 PlayerIcon getter:getDragLeftPng 等返回 URL 字符串直接替换,
+        // getGoodsType 返回图标类型(dlc),B 站 UI 可能据此判断是否显示。
+        // UGC 视频播放页的 PlayerIcon getter 也走这里。
         skinSymbols.videoPlayerIconGetters.forEach { getter ->
             env.hookAfter(getter) { param ->
                 if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
@@ -169,6 +170,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                     "getDragLeftPng" -> playIcon.optString("drag_left_png")
                     "getDragRightPng" -> playIcon.optString("drag_right_png")
                     "getMiddlePng" -> playIcon.optString("middle_png")
+                    "getGoodsType" -> playIcon.optString("goods_type")
                     else -> return@hookAfter
                 }
                 if (url.isNotBlank()) {

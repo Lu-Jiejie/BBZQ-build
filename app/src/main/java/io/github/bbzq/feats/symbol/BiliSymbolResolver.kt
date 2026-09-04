@@ -1048,16 +1048,18 @@ object BiliSymbolResolver {
         val playerIconGetter = playerIconGetters.firstOrNull { it.declaringClass.name == VIEW_REPLY_CLASS }
         val configPlayerIconGetter = playerIconGetters.firstOrNull { it.declaringClass.name != VIEW_REPLY_CLASS }
 
-        // 番剧播放页的 play_icon 走 JSON 反序列化模型 VideoPlayerIcon:
-        // B 站从番剧详情 JSON 解析出 drag_left_png/drag_right_png/middle_png,
-        // UI 通过 getDragLeftPng 等 getter 读取。hook 这些 getter 返回自制 URL。
-        // 这是 9.10.0 的真实消费路径(日志 evidence: dragLeft=...JsonDescriptor)。
+        // 播放页进度条图标(play_icon)的 URL 与类型 getter:
+        // UGC 视频播放页从 PlayerIcon 对象读 getDragLeftPng/getDragRightPng/getMiddlePng,
+        // 对应自制主题的 drag_left_png/drag_right_png/middle_png。
+        // 三个 URL 都要 hook——B 站 UI 可能以 middle_png(不拉状态)为空判定整个图标不渲染;
+        // getGoodsType 用于判断图标类型(dlc),B 站 UI 可能据此决定是否显示。
         val videoPlayerIconGetters = runCatching {
-            currentBridge.findMethod(
-                FindMethod.create().matcher(MethodMatcher.create().name("getDragLeftPng")),
-            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
-                .filter { it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers) && !it.declaringClass.isInterface }
-                .distinctBy { it.declaringClass.name }
+            listOf("getDragLeftPng", "getDragRightPng", "getMiddlePng", "getGoodsType").flatMap { methodName ->
+                currentBridge.findMethod(
+                    FindMethod.create().matcher(MethodMatcher.create().name(methodName)),
+                ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+                    .filter { it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers) && !it.declaringClass.isInterface }
+            }.distinctBy { "${it.declaringClass.name}.${it.name}" }
                 .map { it.apply { isAccessible = true } }
         }.getOrDefault(emptyList())
 
