@@ -1061,26 +1061,63 @@ object BiliSymbolResolver {
         ).mapNotNull { classLoader.loadClassOrNull(it.name) }
             .firstOrNull { type -> type.declaredConstructors.any { Modifier.isPrivate(it.modifiers) } }
 
-        val skinListMethod = themeStoreActivity.declaredMethods.firstOrNull {
+        // 皮肤/主题列表填充方法:主题列表 UI 加载时会调用它来填充列表。
+        // hookThemeList 实际只依赖"第一个参数对象带 mList(MutableList)字段",
+        // 所以 9.10.0 签名变化后按下列顺序回退,而不是在第一次不匹配时失败:
+        //   1. 旧签名 (BiliSkinList, boolean)
+        //   2. 单参数 (BiliSkinList)
+        //   3. (BiliSkinList, Boolean) 包装类型
+        //   4. 任意方法:第一个参数类型带 mList 字段(hookThemeList 的真实约束)
+        val skinListMethodCandidates = themeStoreActivity.declaredMethods.toList()
+        val skinListMethod = skinListMethodCandidates.firstOrNull {
             it.parameterTypes.size == 2 &&
                 it.parameterTypes[0] == skinListClass &&
                 it.parameterTypes[1] == Boolean::class.javaPrimitiveType
+        } ?: skinListMethodCandidates.firstOrNull {
+            it.parameterTypes.size == 1 && it.parameterTypes[0] == skinListClass
+        } ?: skinListMethodCandidates.firstOrNull {
+            it.parameterTypes.size == 2 &&
+                it.parameterTypes[0] == skinListClass &&
+                it.parameterTypes[1] == Boolean::class.javaObjectType
+        } ?: skinListMethodCandidates.firstOrNull { method ->
+            method.parameterTypes.firstOrNull()?.declaredFields?.any { it.name == "mList" } == true
         }?.apply { isAccessible = true }
-            ?: return SymbolScanResult.Missing("theme skin list method not found")
+            ?: return SymbolScanResult.Missing(
+                "theme skin list method not found; methods=" +
+                    skinListMethodCandidates.joinToString("|") { it.toGenericString() },
+            )
 
-        val themeProcessorClass = findClassNamesByNameContains(bridge, listOf("tv.danmaku.bili.ui.theme"))
+        // 主题处理器类:持有皮肤列表字段、且重置主题的方法所在类。
+        // 混淆版本可能把 BiliSkinList 字段改成 List/其它类型,按序回退:
+        //   1. theme 包内 BiliSkinList 字段 > 1 的类(旧路径)
+        //   2. theme 包内 BiliSkinList 字段 >= 1 的类
+        //   3. theme 包内任意 List 字段的类
+        val themeProcessorCandidates = findClassNamesByNameContains(bridge, listOf("tv.danmaku.bili.ui.theme"))
             .mapNotNull(classLoader::loadClassOrNull)
-            .firstOrNull { type -> type.declaredFields.count { it.type == skinListClass } > 1 }
-            ?: return SymbolScanResult.Missing("theme processor class not found")
+        val themeProcessorClass = themeProcessorCandidates.firstOrNull { type ->
+            type.declaredFields.count { it.type == skinListClass } > 1
+        } ?: themeProcessorCandidates.firstOrNull { type ->
+            type.declaredFields.any { it.type == skinListClass }
+        } ?: themeProcessorCandidates.firstOrNull { type ->
+            type.declaredFields.any { it.type == List::class.java || it.type == ArrayList::class.java }
+        } ?: return SymbolScanResult.Missing("theme processor class not found")
+
+        // 主题重置方法:MAIN_ACTIVITY.onPostCreate 时 B 站会重新应用主题,
+        // suppressThemeReset 仅在该调用栈上替换它。旧规则要求包私有(modifiers==0),
+        // 混淆后通常是 public,故只要求"无参非静态"。
         val themeResetMethods = themeProcessorClass.declaredMethods.filter {
-            it.parameterCount == 0 && it.modifiers == 0
+            it.parameterCount == 0 && !Modifier.isStatic(it.modifiers)
         }.onEach { it.isAccessible = true }
         if (themeResetMethods.isEmpty()) {
             return SymbolScanResult.Missing("theme reset methods not found")
         }
 
+        // 主题列表点击监听:点击"自定义颜色"条目时弹输入框。
+        // 9.10.0 可能改用 lambda/别的接口,退化为"有 onClick(View) 方法的内部类"。
         val themeListClickClass = themeStoreActivity.declaredClasses.firstOrNull {
             it.interfaces.contains(View.OnClickListener::class.java)
+        } ?: themeStoreActivity.declaredClasses.firstOrNull { type ->
+            type.declaredMethods.any { it.name == "onClick" && it.parameterTypes.contentEquals(arrayOf(View::class.java)) }
         } ?: return SymbolScanResult.Missing("theme list click listener not found")
 
         val themeNameClass = findThemeNameClass(classLoader, currentBridge)
@@ -1224,12 +1261,18 @@ object BiliSymbolResolver {
             }
     }
 
+    /** 定位主题名映射类(静态 Map 字段),供 installThemeMaps 注入 "custom1/custom2"。 */
     private fun findThemeNameClass(classLoader: ClassLoader, bridge: DexKitBridge): Class<*>? {
-        val candidates = bridge.findClass(
-            FindClass.create().matcher(ClassMatcher.create().usingStrings(".garb.GARB_CHANGE")),
-        ).map { it.name }.toList() + bridge.findClass(
-            FindClass.create().matcher(ClassMatcher.create().usingStrings("white")),
-        ).map { it.name }.toList()
+        // 搜索词覆盖多个版本:装扮变更广播字符串、以及主题逻辑里常见的常量。
+        // 找不到时返回 null,由调用方给出 missing 诊断。
+        val terms = listOf(".garb.GARB_CHANGE", "theme_entries_last_key", "white")
+        val candidates = terms.flatMap { term ->
+            runCatching {
+                bridge.findClass(
+                    FindClass.create().matcher(ClassMatcher.create().usingStrings(term)),
+                ).map { it.name }.toList()
+            }.getOrDefault(emptyList())
+        }
         return candidates.asSequence().distinct().mapNotNull(classLoader::loadClassOrNull)
             .firstOrNull { type ->
                 type.declaredFields.any { Modifier.isStatic(it.modifiers) && it.type == Map::class.java }

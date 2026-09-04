@@ -149,7 +149,7 @@ data class BiliHookSymbols(
 object DexKitRuleVersions {
     // 扫描规则版本:每次修改 BiliSymbolResolver 的 dexkit 扫描规则都必须 +1,
     // 否则设备会命中磁盘里旧的失败缓存,新逻辑不生效。
-    const val CURRENT = 60
+    const val CURRENT = 61
 }
 
 data class HookPointStatus(
