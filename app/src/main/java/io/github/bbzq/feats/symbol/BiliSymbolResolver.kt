@@ -1106,6 +1106,23 @@ object BiliSymbolResolver {
                 FindClass.create().matcher(ClassMatcher.create().usingStrings("LOAD_EQUIP_CHANGE")),
             ).map { it.name }.distinct().take(5)
         }.getOrDefault(emptyList())
+        // 诊断:load_equip 核心管理器(changeOwners/confOwners 双命中,如 ko1.j)的方法签名,
+        // 看它读取配置、加载动画的真实方法,供下轮 hook 其读取边界。
+        val loadEquipManagerMethods = loadEquipChangeOwners.flatMap { owner ->
+            runCatching { classLoader.loadClassOrNull(owner)?.declaredMethods?.map(::sig) }.getOrDefault(emptyList())
+        }.distinct().take(15)
+        // 诊断:所有含 "load_equip" 字符串的类(评论区/自动刷新组件可能读别的 key 或文件)。
+        val loadEquipOwners = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("load_equip")),
+            ).map { it.name }.distinct().take(6)
+        }.getOrDefault(emptyList())
+        // 诊断:含 blkv 文件名(instance.bili_preference)的类,确认 B 站读取的文件名。
+        val blkvFileOwners = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("instance.bili_preference")),
+            ).map { it.name }.distinct().take(5)
+        }.getOrDefault(emptyList())
 
         // 诊断:B 站消费 load_equip / play_icon 字段的类(定位真实注入点)。
         val loadingUrlOwners = runCatching {
@@ -1142,6 +1159,9 @@ object BiliSymbolResolver {
                 ",blkvMethods=${blkvMethods.joinToString("|")}" +
                 ",confOwners=${loadEquipConfOwners.joinToString("|")}" +
                 ",changeOwners=${loadEquipChangeOwners.joinToString("|")}" +
+                ",managerMethods=${loadEquipManagerMethods.joinToString("|")}" +
+                ",loadEquipOwners=${loadEquipOwners.joinToString("|")}" +
+                ",blkvFileOwners=${blkvFileOwners.joinToString("|")}" +
                 ",loadingUrl=${loadingUrlOwners.joinToString("|")}" +
                 ",dragLeft=${dragLeftPngOwners.joinToString("|")}",
         )
