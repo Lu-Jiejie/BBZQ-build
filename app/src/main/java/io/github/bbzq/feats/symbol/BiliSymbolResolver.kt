@@ -1094,6 +1094,26 @@ object BiliSymbolResolver {
         val blkvApi = blkvPrefsFactory?.returnType?.let { clazz ->
             runCatching { clazz.declaredMethods.map(::sig) }.getOrDefault(emptyList())
         }?.take(12).orEmpty()
+
+        // B 站 blkv 读取的最终出口:SharedPrefX 接口的实现类的 get(String,Object) 方法。
+        // 任何进程/组件读 blkv 配置都经过它——hook 后在 key==garb_load_equip_conf 时
+        // 强制返回自制 load_equip JSON,彻底摆脱广播时序与跨进程缓存导致的"时好时坏"。
+        // addInterface 找实现类(与 controller 扫描同源),再逐个找 get 方法。可选增强。
+        val blkvGetMethods = runCatching {
+            val implClasses = currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().addInterface("com.bilibili.lib.blkv.SharedPrefX")),
+            ).mapNotNull { runCatching { classLoader.loadClassOrNull(it.name) }.getOrNull() }
+            implClasses.flatMap { clazz ->
+                clazz.declaredMethods.asSequence()
+                    .filter { method ->
+                        method.name == "get" && method.parameterCount == 2 &&
+                            method.parameterTypes[0] == String::class.java &&
+                            !method.parameterTypes[1].isPrimitive
+                    }
+                    .map { it.apply { isAccessible = true } }
+                    .toList()
+            }.distinctBy { "${it.declaringClass.name}.${it.name}" }
+        }.getOrDefault(emptyList())
         // 诊断:B 站读取下拉动画配置的调用点(含 "garb_load_equip_conf" 字符串的类)。
         val loadEquipConfOwners = runCatching {
             currentBridge.findClass(
@@ -1148,6 +1168,7 @@ object BiliSymbolResolver {
             configPlayerIconGetter = configPlayerIconGetter?.let(MethodDescriptor::of),
             videoPlayerIconGetters = videoPlayerIconGetters.map(MethodDescriptor::of),
             blkvPrefsFactory = blkvPrefsFactory?.let(MethodDescriptor::of),
+            blkvGetMethods = blkvGetMethods.map(MethodDescriptor::of),
             evidence = "resolver=${resolverMethod.declaringClass.name}.${resolverMethod.name}" +
                 ",userGarb=${skinResponseUserGarbSetter != null}" +
                 ",loadEquip=${skinResponseLoadEquipSetter != null}" +
@@ -1155,6 +1176,7 @@ object BiliSymbolResolver {
                 ",configPlayerIcon=${configPlayerIconGetter != null}" +
                 ",videoPlayerIcon=${videoPlayerIconGetters.size}" +
                 ",blkvFactory=${blkvPrefsFactory != null}" +
+                ",blkvGets=${blkvGetMethods.size}" +
                 ",blkvApi=${blkvApi.joinToString("|")}" +
                 ",blkvMethods=${blkvMethods.joinToString("|")}" +
                 ",confOwners=${loadEquipConfOwners.joinToString("|")}" +

@@ -49,6 +49,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                 hookSkinResponse(skinSymbols)
                 hookPlayIcon(skinSymbols)
                 applyLoadEquipConf(skinSymbols)
+                hookBlkvGet(skinSymbols)
             }
             // Suppressing the reset also stops an already-equipped theme from overriding
             // the imported skin when MainActivity restores it on startup.
@@ -307,6 +308,32 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             .getOrElse { runCatching { editor.javaClass.getMethod("commit").invoke(editor) } }
     }
 
+    /**
+     * 读取边界拦截:B 站所有 blkv 读取都经过 SharedPrefX 实现类的 get(String,Object)。
+     * hook 后,任何进程/组件读 garb_load_equip_conf 都强制返回自制 load_equip JSON,
+     * 摆脱广播时序与跨进程缓存导致的"时好时坏"。可选增强。
+     */
+    private fun hookBlkvGet(skinSymbols: RestoredCustomSkinSymbols) {
+        if (skinSymbols.blkvGetMethods.isEmpty()) {
+            log("Custom skin blkv get hook skipped: SharedPrefX get methods missing")
+            return
+        }
+        skinSymbols.blkvGetMethods.forEach { getter ->
+            env.hookAfter(getter) { param ->
+                if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
+                if (param.args.getOrNull(0) != LOAD_EQUIP_CONF_KEY) return@hookAfter
+                val root = customSkinConfig() ?: return@hookAfter
+                val loadEquip = root.optJSONObject("load_equip") ?: return@hookAfter
+                if (loadEquip.optString("loading_url").isBlank() || loadEquip.optLong("id") <= 0L) {
+                    return@hookAfter
+                }
+                param.result = loadEquip.toString()
+                log("Custom skin blkv get injected: ${getter.declaringClass.name}.${getter.name}")
+            }
+            log("Custom skin blkv get hook installed: ${getter.declaringClass.name}.${getter.name}")
+        }
+    }
+
     private fun customSkinConfig(): JSONObject? = runCatching {
         val raw = ModuleSettings.getCustomSkinJson(prefs)
         if (raw.isBlank()) return null
@@ -358,6 +385,8 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         if (!ModuleSettings.isCustomSkinEnabled(prefs)) return
         val skinSymbols = env.symbols?.customSkin?.restore(classLoader) ?: return
         applyLoadEquipConf(skinSymbols)
+        // web 进程是渲染列表/评论区的地方,读取边界拦截在这里同样必需
+        hookBlkvGet(skinSymbols)
     }
 
     private fun installThemeMaps(symbols: RestoredCustomThemeSymbols, primaryColor: Int) {

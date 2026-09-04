@@ -147,7 +147,7 @@ data class BiliHookSymbols(
 }
 
 object DexKitRuleVersions {
-    const val CURRENT = 67
+    const val CURRENT = 68
 }
 
 data class HookPointStatus(
@@ -2015,9 +2015,12 @@ data class CustomSkinSymbols(
     // 番剧播放页 JSON 模型的 play_icon getter(getDragLeftPng 等):
     // 9.10.0 番剧走 kotlinx.serialization 反序列化,UI 通过这些 getter 读图标 URL。
     val videoPlayerIconGetters: List<MethodDescriptor> = emptyList(),
-    // B 站 blkv 工厂方法(签名 Context,String,Z,I 返回 SharedPreferences):
+    // B 站 blkv 工厂方法(签名 Context,String,Z,I 返回 SharedPrefX):
     // 反射调用它写入 garb_load_equip_conf,替代"写不了 B 站私有 blkv"的旧限制。可选。
     val blkvPrefsFactory: MethodDescriptor? = null,
+    // SharedPrefX 实现类的 get(String,Object) 方法:B 站所有 blkv 读取的最终出口,
+    // hook 后读取 garb_load_equip_conf 时强制返回自制 JSON,摆脱广播时序/跨进程缓存。可选。
+    val blkvGetMethods: List<MethodDescriptor> = emptyList(),
     val evidence: String,
 ) {
     fun toJson(): JSONObject = JSONObject()
@@ -2030,6 +2033,7 @@ data class CustomSkinSymbols(
         .putOpt("configPlayerIconGetter", configPlayerIconGetter?.toJson())
         .put("videoPlayerIconGetters", org.json.JSONArray(videoPlayerIconGetters.map { it.toJson() }))
         .putOpt("blkvPrefsFactory", blkvPrefsFactory?.toJson())
+        .put("blkvGetMethods", org.json.JSONArray(blkvGetMethods.map { it.toJson() }))
         .put("evidence", evidence)
 
     fun restore(classLoader: ClassLoader): RestoredCustomSkinSymbols? {
@@ -2042,6 +2046,7 @@ data class CustomSkinSymbols(
         val configPlayerIconGetter = configPlayerIconGetter?.restoreOptional(classLoader)
         val videoPlayerIconGetters = videoPlayerIconGetters.mapNotNull { it.restoreOptional(classLoader) }
         val blkvPrefsFactory = blkvPrefsFactory?.restoreOptional(classLoader)
+        val blkvGetMethods = blkvGetMethods.mapNotNull { it.restoreOptional(classLoader) }
         return RestoredCustomSkinSymbols(
             resolverMethod = resolver,
             skinResponseClass = skinResponseClass,
@@ -2052,6 +2057,7 @@ data class CustomSkinSymbols(
             configPlayerIconGetter = configPlayerIconGetter,
             videoPlayerIconGetters = videoPlayerIconGetters,
             blkvPrefsFactory = blkvPrefsFactory,
+            blkvGetMethods = blkvGetMethods,
         )
     }
 
@@ -2070,6 +2076,11 @@ data class CustomSkinSymbols(
                 }
             } ?: emptyList(),
             blkvPrefsFactory = obj.optJSONObject("blkvPrefsFactory")?.let(MethodDescriptor::fromJson),
+            blkvGetMethods = obj.optJSONArray("blkvGetMethods")?.let { arr ->
+                (0 until arr.length()).mapNotNull { i ->
+                    arr.optJSONObject(i)?.let(MethodDescriptor::fromJson)
+                }
+            } ?: emptyList(),
             evidence = obj.optString("evidence", "-"),
         )
     }
@@ -2085,6 +2096,7 @@ data class RestoredCustomSkinSymbols(
     val configPlayerIconGetter: Method?,
     val videoPlayerIconGetters: List<Method>,
     val blkvPrefsFactory: Method?,
+    val blkvGetMethods: List<Method>,
 )
 
 data class CustomThemeSymbols(
