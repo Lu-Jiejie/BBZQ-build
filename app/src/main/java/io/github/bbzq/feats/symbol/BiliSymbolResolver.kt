@@ -1023,30 +1023,37 @@ object BiliSymbolResolver {
         val skinClass = classLoader.loadClassOrNull(BILI_SKIN)
             ?: return SymbolScanResult.Missing("BiliSkin not found")
 
-        // Bilibili obfuscates the theme helper per release ("theme_entries_last_key"
-        // constant / method signature can drift, e.g. 9.10.0). Resolve the color array
-        // holder with layered fallbacks instead of failing on the first signature miss:
-        //   1. string-anchored method + same-named static SparseArray field (legacy)
-        //   2. same string method's declaring class, any static SparseArray<int[]> field
-        //   3. any theme-package class declaring a static SparseArray<int[]> field
+        // Bilibili 每个版本都会混淆主题辅助类("theme_entries_last_key" 常量、方法签名、
+        // 字段泛型都可能变化,例如 9.10.0)。这里用分层回退定位主题色数组持有类,
+        // 而不是在第一次签名不匹配时就直接失败:
+        //   1. 命中字符串的方法 + 与其同名的静态 SparseArray 字段(旧版路径)
+        //   2. 命中字符串的方法所在类,任意静态 SparseArray 字段(容忍泛型被混淆剥离)
+        //   3. theme/garb/ui 包内任意声明静态 SparseArray 字段的类(最终兜底)
         val colorArrayMethods = runCatching {
             currentBridge.findMethod(
                 FindMethod.create().matcher(MethodMatcher.create().usingStrings("theme_entries_last_key")),
             ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
         }.getOrDefault(emptyList())
+        var colorArrayScanNotes = "stringMethods=${colorArrayMethods.size}"
         val colorArrayHolder = colorArrayMethods.asSequence()
             .mapNotNull { method ->
                 val owner = method.declaringClass
+                // 1. 旧版路径:与字符串方法同名的静态 SparseArray 字段
                 owner.declaredFields.firstOrNull {
                     it.name == method.name && it.type == SparseArray::class.java && Modifier.isStatic(it.modifiers)
                 }?.apply { isAccessible = true }?.let { owner to it }
+                    // 2. 同类的任意静态 SparseArray 字段(混淆后泛型可能被剥离,不再强制 int[])
+                    ?: owner.declaredFields.firstOrNull {
+                        Modifier.isStatic(it.modifiers) && it.type == SparseArray::class.java
+                    }?.apply { isAccessible = true }?.let { owner to it }
             }.firstOrNull()
-            ?: colorArrayMethods.asSequence()
-                .mapNotNull { method -> intArraySparseArrayField(method.declaringClass)?.let { method.declaringClass to it } }
-                .firstOrNull()
-            ?: findThemeColorArrayHolderBySparseArray(classLoader, bridge)
+            ?: run {
+                val fallback = findThemeColorArrayHolderBySparseArray(classLoader, bridge)
+                colorArrayScanNotes += fallback?.let { ";fallback=${it.first.name}" } ?: ";fallback=null"
+                fallback
+            }
         val themeHelperClass = colorArrayHolder?.first
-            ?: return SymbolScanResult.Missing("theme color array method not found")
+            ?: return SymbolScanResult.Missing("theme color array method not found ($colorArrayScanNotes)")
         val colorArrayField = colorArrayHolder.second
 
         val themeColorsClass = currentBridge.findClass(
@@ -1140,59 +1147,80 @@ object BiliSymbolResolver {
     /** True for `SparseArray<int[]>` fields, which is how Bilibili stores theme color arrays. */
     private fun Field.isThemeColorArrayField(): Boolean {
         if (!Modifier.isStatic(modifiers) || type != SparseArray::class.java) return false
-        val generic = genericType
-        return generic is ParameterizedType &&
-            generic.actualTypeArguments.size == 1 &&
-            generic.actualTypeArguments[0] == IntArray::class.java
+        return when (val generic = genericType) {
+            is ParameterizedType -> {
+                generic.actualTypeArguments.size == 1 && generic.actualTypeArguments[0] == IntArray::class.java
+            }
+            // 混淆可能剥离泛型签名,此时退化为普通 SparseArray 也可接受;
+            // 是否真的是颜色数组由调用方的包前缀约束兜底。
+            else -> true
+        }
     }
 
     private fun intArraySparseArrayField(type: Class<*>): Field? =
         type.declaredFields.firstOrNull { it.isThemeColorArrayField() }?.apply { isAccessible = true }
 
+    /** 遍历类的直接字段与所有嵌套类(含深层)中的静态 SparseArray 字段。 */
+    private fun collectStaticSparseArrayFields(
+        type: Class<*>,
+        acceptAny: Boolean,
+    ): List<Pair<Class<*>, Field>> {
+        val visited = HashSet<Class<*>>()
+        val result = ArrayList<Pair<Class<*>, Field>>()
+        fun visit(t: Class<*>) {
+            if (!visited.add(t)) return
+            for (field in t.declaredFields) {
+                if (!Modifier.isStatic(field.modifiers) || field.type != SparseArray::class.java) continue
+                if (acceptAny || field.isThemeColorArrayField()) {
+                    runCatching { field.isAccessible = true }
+                    result += t to field
+                }
+            }
+            // 内部类里也可能持有主题色数组(例如 ThemeStoreActivity 的嵌套辅助类)
+            t.declaredClasses.forEach { visit(it) }
+        }
+        visit(type)
+        return result
+    }
+
     /**
-     * Last-resort fallback for the theme color array holder when the
-     * "theme_entries_last_key" string scan comes up empty on newer releases.
-     * Prefers classes in the theme package, then any class whose name contains
-     * "theme". Accepts static SparseArray fields; int[]-typed generic signature
-     * is preferred, but obfuscation may strip generics, so a static SparseArray
-     * inside the theme package is accepted as well.
+     * 兜底定位主题色数组持有类:当 "theme_entries_last_key" 字符串扫描在较新版本
+     * 上落空时使用。优先搜 theme 包,其次 garb 包(9.10.0 起装扮/主题同域),
+     * 再扩大到 "tv.danmaku.bili.ui" 前缀与名称含 theme/garb 的类。
+     * 泛型被混淆剥离时接受任意静态 SparseArray;包前缀为 theme/garb/ui 时
+     * 放宽到任意静态 SparseArray,避免因泛型信息丢失而漏掉目标。
      */
     private fun findThemeColorArrayHolderBySparseArray(
         classLoader: ClassLoader,
         bridge: () -> DexKitBridge?,
     ): Pair<Class<*>, Field>? {
         val currentBridge = bridge() ?: return null
-        val packageMatches = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create().className("tv.danmaku.bili.ui.theme", StringMatchType.Contains),
-                ),
-            ).map { it.name }.toList()
-        }.getOrElse { throwable ->
-            throw IllegalStateException("DexKit theme class name search failed: ${throwable.scanMessage()}", throwable)
-        }
-        val broadMatches = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create().className("theme", StringMatchType.Contains),
-                ),
-            ).map { it.name }.toList()
-        }.getOrElse { throwable ->
-            throw IllegalStateException("DexKit theme class name search failed: ${throwable.scanMessage()}", throwable)
-        }
-        val prioritized = (packageMatches + broadMatches).distinct()
+        val terms = listOf(
+            "tv.danmaku.bili.ui.theme",
+            "tv.danmaku.bili.ui.garb",
+            "tv.danmaku.bili.ui",
+        )
+        val matches = terms.flatMap { term ->
+            runCatching {
+                currentBridge.findClass(
+                    FindClass.create().matcher(ClassMatcher.create().className(term, StringMatchType.Contains)),
+                ).map { it.name }.toList()
+            }.getOrElse { throwable ->
+                throw IllegalStateException("DexKit class name search failed term=$term: ${throwable.scanMessage()}", throwable)
+            }
+        }.distinct()
+        val prioritized = matches.sortedWith(
+            compareByDescending<String> { it.startsWith("tv.danmaku.bili.ui.theme.") }
+                .thenByDescending { it.startsWith("tv.danmaku.bili.ui.garb.") },
+        )
         return prioritized.asSequence()
             .mapNotNull(classLoader::loadClassOrNull)
             .firstNotNullOfOrNull { type ->
-                val typed = intArraySparseArrayField(type)
-                if (typed != null) return@firstNotNullOfOrNull type to typed
-                if (type.name.startsWith("tv.danmaku.bili.ui.theme.")) {
-                    type.declaredFields.firstOrNull {
-                        Modifier.isStatic(it.modifiers) && it.type == SparseArray::class.java
-                    }?.apply { isAccessible = true }?.let { type to it }
-                } else {
-                    null
-                }
+                // 强相关包(theme/garb)优先接受任意静态 SparseArray(泛型可能被剥离),
+                // 其它包只接受带 int[] 泛型签名的,降低误命中面。
+                val acceptAny = type.name.startsWith("tv.danmaku.bili.ui.theme.") ||
+                    type.name.startsWith("tv.danmaku.bili.ui.garb.")
+                collectStaticSparseArrayFields(type, acceptAny).firstOrNull()
             }
     }
 

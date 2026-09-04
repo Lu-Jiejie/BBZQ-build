@@ -69,9 +69,10 @@ internal object CustomSkinApplier {
             }
         }
         if (Build.VERSION.SDK_INT >= 33) {
-            // Android 13+ requires an explicit export flag for non-system broadcasts,
-            // otherwise registerReceiver throws SecurityException and the whole
-            // CustomThemeHook.startHook() fails (skin feature never installs).
+            // Android 13+ 注册非系统广播必须显式声明导出标志,
+            // 否则 registerReceiver 抛 SecurityException,
+            // 导致整个 CustomThemeHook.startHook() 失败(皮肤功能无法安装)。
+            // 该广播由 B 站宿主自身发送,无需向其它应用导出。
             env.hostContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             env.hostContext.registerReceiver(receiver, filter)
