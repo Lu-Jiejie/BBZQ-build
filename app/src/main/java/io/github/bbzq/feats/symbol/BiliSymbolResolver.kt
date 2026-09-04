@@ -1023,19 +1023,31 @@ object BiliSymbolResolver {
         val skinClass = classLoader.loadClassOrNull(BILI_SKIN)
             ?: return SymbolScanResult.Missing("BiliSkin not found")
 
-        val colorArrayMethod = currentBridge.findMethod(
-            FindMethod.create().matcher(MethodMatcher.create().usingStrings("theme_entries_last_key")),
-        ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
-            .firstOrNull {
-                it.parameterTypes.contentEquals(arrayOf(Context::class.java)) &&
-                    it.returnType == Int::class.javaPrimitiveType
-            }
+        // Bilibili obfuscates the theme helper per release ("theme_entries_last_key"
+        // constant / method signature can drift, e.g. 9.10.0). Resolve the color array
+        // holder with layered fallbacks instead of failing on the first signature miss:
+        //   1. string-anchored method + same-named static SparseArray field (legacy)
+        //   2. same string method's declaring class, any static SparseArray<int[]> field
+        //   3. any theme-package class declaring a static SparseArray<int[]> field
+        val colorArrayMethods = runCatching {
+            currentBridge.findMethod(
+                FindMethod.create().matcher(MethodMatcher.create().usingStrings("theme_entries_last_key")),
+            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+        }.getOrDefault(emptyList())
+        val colorArrayHolder = colorArrayMethods.asSequence()
+            .mapNotNull { method ->
+                val owner = method.declaringClass
+                owner.declaredFields.firstOrNull {
+                    it.name == method.name && it.type == SparseArray::class.java && Modifier.isStatic(it.modifiers)
+                }?.apply { isAccessible = true }?.let { owner to it }
+            }.firstOrNull()
+            ?: colorArrayMethods.asSequence()
+                .mapNotNull { method -> intArraySparseArrayField(method.declaringClass)?.let { method.declaringClass to it } }
+                .firstOrNull()
+            ?: findThemeColorArrayHolderBySparseArray(classLoader, bridge)
+        val themeHelperClass = colorArrayHolder?.first
             ?: return SymbolScanResult.Missing("theme color array method not found")
-        val themeHelperClass = colorArrayMethod.declaringClass
-        val colorArrayField = themeHelperClass.declaredFields.firstOrNull {
-            it.name == colorArrayMethod.name && it.type == SparseArray::class.java && Modifier.isStatic(it.modifiers)
-        }?.apply { isAccessible = true }
-            ?: return SymbolScanResult.Missing("theme color SparseArray not found")
+        val colorArrayField = colorArrayHolder.second
 
         val themeColorsClass = currentBridge.findClass(
             FindClass.create().matcher(ClassMatcher.create().usingStrings("GarbThemeColors(garb=")),
@@ -1123,6 +1135,65 @@ object BiliSymbolResolver {
             skinResolveMethod = skinResolveMethod?.let(MethodDescriptor::of),
         )
         return SymbolScanResult.Found(symbols, themeStoreActivity.name, symbols.evidence)
+    }
+
+    /** True for `SparseArray<int[]>` fields, which is how Bilibili stores theme color arrays. */
+    private fun Field.isThemeColorArrayField(): Boolean {
+        if (!Modifier.isStatic(modifiers) || type != SparseArray::class.java) return false
+        val generic = genericType
+        return generic is ParameterizedType &&
+            generic.actualTypeArguments.size == 1 &&
+            generic.actualTypeArguments[0] == IntArray::class.java
+    }
+
+    private fun intArraySparseArrayField(type: Class<*>): Field? =
+        type.declaredFields.firstOrNull { it.isThemeColorArrayField() }?.apply { isAccessible = true }
+
+    /**
+     * Last-resort fallback for the theme color array holder when the
+     * "theme_entries_last_key" string scan comes up empty on newer releases.
+     * Prefers classes in the theme package, then any class whose name contains
+     * "theme". Accepts static SparseArray fields; int[]-typed generic signature
+     * is preferred, but obfuscation may strip generics, so a static SparseArray
+     * inside the theme package is accepted as well.
+     */
+    private fun findThemeColorArrayHolderBySparseArray(
+        classLoader: ClassLoader,
+        bridge: () -> DexKitBridge?,
+    ): Pair<Class<*>, Field>? {
+        val currentBridge = bridge() ?: return null
+        val packageMatches = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(
+                    ClassMatcher.create().className("tv.danmaku.bili.ui.theme", StringMatchType.Contains),
+                ),
+            ).map { it.name }.toList()
+        }.getOrElse { throwable ->
+            throw IllegalStateException("DexKit theme class name search failed: ${throwable.scanMessage()}", throwable)
+        }
+        val broadMatches = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(
+                    ClassMatcher.create().className("theme", StringMatchType.Contains),
+                ),
+            ).map { it.name }.toList()
+        }.getOrElse { throwable ->
+            throw IllegalStateException("DexKit theme class name search failed: ${throwable.scanMessage()}", throwable)
+        }
+        val prioritized = (packageMatches + broadMatches).distinct()
+        return prioritized.asSequence()
+            .mapNotNull(classLoader::loadClassOrNull)
+            .firstNotNullOfOrNull { type ->
+                val typed = intArraySparseArrayField(type)
+                if (typed != null) return@firstNotNullOfOrNull type to typed
+                if (type.name.startsWith("tv.danmaku.bili.ui.theme.")) {
+                    type.declaredFields.firstOrNull {
+                        Modifier.isStatic(it.modifiers) && it.type == SparseArray::class.java
+                    }?.apply { isAccessible = true }?.let { type to it }
+                } else {
+                    null
+                }
+            }
     }
 
     private fun findThemeNameClass(classLoader: ClassLoader, bridge: DexKitBridge): Class<*>? {
