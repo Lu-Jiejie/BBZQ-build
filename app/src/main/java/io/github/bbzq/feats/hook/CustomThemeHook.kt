@@ -231,8 +231,8 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
     /**
      * 下拉刷新动画(load_equip)配置写入:
      * B 站 web 进程从 blkv 读 "garb_load_equip_conf" 才知道动画文件名(base64(loading_url))。
-     * 反射调用 B 站 blkv 工厂方法(签名 Context,String,Z,I 返回 SharedPreferences,
-     * 与 BiliRoamingX BLKV fingerprint 同源)拿到 blkv 实例,直接 putString 写入,
+     * 反射调用 B 站 blkv 工厂方法(签名 Context,String,Z,I,返回 SharedPrefX——
+     * B 站自定义 blkv 接口,非标准 SharedPreferences)拿到实例后写入,
      * 复刻 BiliRoamingX 的写入路径,替代"写不了 B 站私有 blkv 格式"的旧限制。
      * 最后广播 LOAD_EQUIP_CHANGE 让 web 进程重读。可选增强。
      */
@@ -251,16 +251,60 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             return
         }
         runCatching {
-            // BiliRoamingX 调用约定:blkvPrefsByName(context, name, multiProcess, 0)
-            val prefs = factory.invoke(null, env.hostContext, LOAD_EQUIP_CONF_PREFS_FILE, false, 0)
-                as android.content.SharedPreferences
-            prefs.edit().putString(LOAD_EQUIP_CONF_KEY, loadEquip.toString()).apply()
+            // 工厂是静态方法:BiliRoamingX 用 invoke-static 调用,传 null 接收者
+            val prefs = factory.invoke(null, env.hostContext, LOAD_EQUIP_CONF_PREFS_FILE, false, 0) ?: return@runCatching
+            if (!writeBlkv(prefs, LOAD_EQUIP_CONF_KEY, loadEquip.toString())) {
+                log("Custom skin load equip conf write failed: no putString api on ${prefs.javaClass.name}")
+                return@runCatching
+            }
             // 先写 blkv 再广播,web 进程收到广播后重读才能拿到新配置(与 BiliRoamingX 顺序一致)
             env.hostContext.sendBroadcast(Intent("${env.packageName}.garb.LOAD_EQUIP_CHANGE"))
             log("Custom skin load equip conf written: id=${loadEquip.optLong("id")} via ${factory.declaringClass.name}.${factory.name}")
         }.onFailure {
             log("Custom skin load equip conf write failed", it)
         }
+    }
+
+    /**
+     * 通过反射向 B 站 blkv 写入一个 key:优先标准 SharedPreferences
+     * (edit().putString().apply()),失败则适配 B 站自定义 SharedPrefX 接口
+     * (可能直接有 putString,或 editor 独立提交)。逐级降级尝试。
+     */
+    private fun writeBlkv(prefs: Any, key: String, value: String): Boolean {
+        // 1) 标准路径:edit() -> putString -> apply()/commit()
+        runCatching {
+            val editor = prefs.javaClass.getMethod("edit").invoke(prefs) ?: return@runCatching
+            editor.javaClass.getMethod("putString", String::class.java, String::class.java)
+                .invoke(editor, key, value)
+            commitIfPresent(editor)
+            return true
+        }
+        // 2) 对象直接写:putString() -> apply()/commit()
+        runCatching {
+            prefs.javaClass.getMethod("putString", String::class.java, String::class.java)
+                .invoke(prefs, key, value)
+            commitIfPresent(prefs)
+            return true
+        }
+        // 3) 按方法名模糊找 editor 型方法(如 editString/editor)
+        runCatching {
+            val editMethod = prefs.javaClass.methods.firstOrNull { m ->
+                m.parameterCount == 0 && m.returnType.name.contains("Editor")
+            } ?: return@runCatching
+            val editor = editMethod.invoke(prefs) ?: return@runCatching
+            val put = editor.javaClass.methods.firstOrNull { m ->
+                m.name == "putString" && m.parameterCount == 2
+            } ?: return@runCatching
+            put.invoke(editor, key, value)
+            commitIfPresent(editor)
+            return true
+        }
+        return false
+    }
+
+    private fun commitIfPresent(editor: Any) {
+        runCatching { editor.javaClass.getMethod("apply").invoke(editor) }
+            .getOrElse { runCatching { editor.javaClass.getMethod("commit").invoke(editor) } }
     }
 
     private fun customSkinConfig(): JSONObject? = runCatching {

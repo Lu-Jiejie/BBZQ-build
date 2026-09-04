@@ -1063,10 +1063,9 @@ object BiliSymbolResolver {
                 .map { it.apply { isAccessible = true } }
         }.getOrDefault(emptyList())
 
-        // B 站 blkv 工厂方法:与 BiliRoamingX BLKV fingerprint 同源——
-        // 含 ".blkv" 字符串、签名 (Context, String, Z, I) 返回 SharedPreferences。
-        // 反射调用它拿到 blkv 实例,直接 putString("garb_load_equip_conf", json),
-        // 复刻 B 站官方写入路径,替代"写不了 B 站私有 blkv 格式"的旧限制。可选增强。
+        // B 站 blkv 工厂方法:返回 SharedPrefX(自定义 blkv 接口,不是标准 SharedPreferences)。
+        // 反射调用它拿到 blkv 实例,直接写入 garb_load_equip_conf,复刻 B 站官方写入路径。
+        // 返回类型名只匹配 "Shared"(兼容 SharedPrefX / SharedPreferences),可选增强。
         val blkvPrefsFactory = runCatching {
             currentBridge.findMethod(
                 FindMethod.create().matcher(MethodMatcher.create().usingStrings(".blkv")),
@@ -1077,7 +1076,7 @@ object BiliSymbolResolver {
                         method.parameterTypes[1] == String::class.java &&
                         method.parameterTypes[2] == Boolean::class.javaPrimitiveType &&
                         method.parameterTypes[3] == Int::class.javaPrimitiveType &&
-                        method.returnType.name.contains("SharedPreferences")
+                        method.returnType.name.contains("Shared")
                 }
                 ?.apply { isAccessible = true }
         }.getOrNull()
@@ -1091,6 +1090,10 @@ object BiliSymbolResolver {
             ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
                 .map(::sig).distinct().take(8)
         }.getOrDefault(emptyList())
+        // 诊断:blkv 接口(SharedPrefX)的方法清单,用于反射写入时选对方法。
+        val blkvApi = blkvPrefsFactory?.returnType?.let { clazz ->
+            runCatching { clazz.declaredMethods.map(::sig) }.getOrDefault(emptyList())
+        }?.take(12).orEmpty()
         // 诊断:B 站读取下拉动画配置的调用点(含 "garb_load_equip_conf" 字符串的类)。
         val loadEquipConfOwners = runCatching {
             currentBridge.findClass(
@@ -1135,6 +1138,7 @@ object BiliSymbolResolver {
                 ",configPlayerIcon=${configPlayerIconGetter != null}" +
                 ",videoPlayerIcon=${videoPlayerIconGetters.size}" +
                 ",blkvFactory=${blkvPrefsFactory != null}" +
+                ",blkvApi=${blkvApi.joinToString("|")}" +
                 ",blkvMethods=${blkvMethods.joinToString("|")}" +
                 ",confOwners=${loadEquipConfOwners.joinToString("|")}" +
                 ",changeOwners=${loadEquipChangeOwners.joinToString("|")}" +
