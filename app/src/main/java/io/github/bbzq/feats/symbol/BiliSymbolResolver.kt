@@ -1035,25 +1035,42 @@ object BiliSymbolResolver {
 
         // 播放页 playerIcon getter:进度条拖动图标(play_icon)挂载在
         // ViewReply.getPlayerIcon() 的返回对象上。用方法名全 dex 扫描,
-        // 兼容旧接口(app.view.v1)与新接口(viewunite 的 Config)。可选增强。
+        // 兼容旧接口(app.view.v1)与新接口(viewunite 的 Config)。
+        // 注意过滤抽象方法(接口方法无法 hook)。可选增强。
         val playerIconGetters = runCatching {
             currentBridge.findMethod(
                 FindMethod.create().matcher(MethodMatcher.create().name("getPlayerIcon")),
             ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
-                .filter { it.parameterCount == 0 }
+                .filter { it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers) && !it.declaringClass.isInterface }
                 .distinctBy { it.declaringClass.name }
                 .map { it.apply { isAccessible = true } }
         }.getOrDefault(emptyList())
         val playerIconGetter = playerIconGetters.firstOrNull { it.declaringClass.name == VIEW_REPLY_CLASS }
         val configPlayerIconGetter = playerIconGetters.firstOrNull { it.declaringClass.name != VIEW_REPLY_CLASS }
 
-        // B 站 blkv 配置读取类:含 ".blkv" 字符串(与 BiliRoamingX BLKV fingerprint 同源)。
-        // hook 其 getString(key, def),读取 garb_load_equip_conf 时返回自制 load_equip JSON,
-        // 替代写 B 站私有 blkv(key 字符串在 9.10.0 dex 中可能被拼接,不能按 key 扫描)。可选。
+        // 番剧播放页的 play_icon 走 JSON 反序列化模型 VideoPlayerIcon:
+        // B 站从番剧详情 JSON 解析出 drag_left_png/drag_right_png/middle_png,
+        // UI 通过 getDragLeftPng 等 getter 读取。hook 这些 getter 返回自制 URL。
+        // 这是 9.10.0 的真实消费路径(日志 evidence: dragLeft=...JsonDescriptor)。
+        val videoPlayerIconGetters = runCatching {
+            currentBridge.findMethod(
+                FindMethod.create().matcher(MethodMatcher.create().name("getDragLeftPng")),
+            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+                .filter { it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers) && !it.declaringClass.isInterface }
+                .distinctBy { it.declaringClass.name }
+                .map { it.apply { isAccessible = true } }
+        }.getOrDefault(emptyList())
+
+        // B 站 blkv 配置读取:与 BiliRoamingX BLKV fingerprint 同源——
+        // 找含 ".blkv" 字符串的方法(blkv 工厂),其声明类即 blkv 工具类,
+        // 再在这些类里找 getString(key, def) 供 hook。可选增强。
         val loadEquipConfGetter = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(ClassMatcher.create().usingStrings(".blkv")),
-            ).mapNotNull { runCatching { classLoader.loadClassOrNull(it.name) }.getOrNull() }
+            val blkvClasses = currentBridge.findMethod(
+                FindMethod.create().matcher(MethodMatcher.create().usingStrings(".blkv")),
+            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+                .map { it.declaringClass }
+                .distinct()
+            blkvClasses.asSequence()
                 .flatMap { it.declaredMethods.asSequence() }
                 .firstOrNull { method ->
                     method.name == "getString" && method.parameterCount == 2 &&
@@ -1086,12 +1103,14 @@ object BiliSymbolResolver {
             skinResolveMethod = skinResolveMethod?.let(MethodDescriptor::of),
             playerIconGetter = playerIconGetter?.let(MethodDescriptor::of),
             configPlayerIconGetter = configPlayerIconGetter?.let(MethodDescriptor::of),
+            videoPlayerIconGetters = videoPlayerIconGetters.map(MethodDescriptor::of),
             loadEquipConfGetter = loadEquipConfGetter?.let(MethodDescriptor::of),
             evidence = "resolver=${resolverMethod.declaringClass.name}.${resolverMethod.name}" +
                 ",userGarb=${skinResponseUserGarbSetter != null}" +
                 ",loadEquip=${skinResponseLoadEquipSetter != null}" +
                 ",playerIcon=${playerIconGetter != null}" +
                 ",configPlayerIcon=${configPlayerIconGetter != null}" +
+                ",videoPlayerIcon=${videoPlayerIconGetters.size}" +
                 ",loadEquipConf=${loadEquipConfGetter != null}" +
                 ",loadingUrl=${loadingUrlOwners.joinToString("|")}" +
                 ",dragLeft=${dragLeftPngOwners.joinToString("|")}",

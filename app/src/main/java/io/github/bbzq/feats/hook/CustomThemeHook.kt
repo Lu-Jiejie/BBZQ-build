@@ -132,17 +132,18 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
     /**
      * 播放页进度条拖动图标(play_icon)注入:
      * 自制主题 JSON 里的 drag_left_png / drag_right_png / middle_png
-     * 是进度条控件左拉、右拉、不拉三种状态的表现图。挂载点不唯一:
-     * 旧接口 ViewReply.getPlayerIcon() 与新接口(viewunite)Config.getPlayerIcon()
-     * 都可能是消费点,这里对找到的所有 getPlayerIcon 统一注入。可选增强。
+     * 是进度条控件左拉、右拉、不拉三种状态的表现图。挂载点分两类:
+     * 1) protobuf 模型(ViewReply.getPlayerIcon / Config.getPlayerIcon),返回 PlayerIcon 对象;
+     * 2) 番剧详情 JSON 模型(getDragLeftPng 等,9.10.0 走 kotlinx.serialization),返回 URL 字符串。
+     * 两类统一注入。可选增强。
      */
     private fun hookPlayIcon(skinSymbols: RestoredCustomSkinSymbols) {
-        val getters = listOfNotNull(skinSymbols.playerIconGetter, skinSymbols.configPlayerIconGetter)
-        if (getters.isEmpty()) {
+        val protobufGetters = listOfNotNull(skinSymbols.playerIconGetter, skinSymbols.configPlayerIconGetter)
+        if (protobufGetters.isEmpty() && skinSymbols.videoPlayerIconGetters.isEmpty()) {
             log("Custom skin play icon hook skipped: playerIcon getters missing")
             return
         }
-        getters.forEach { getter ->
+        protobufGetters.forEach { getter ->
             env.hookAfter(getter) { param ->
                 if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
                 val playIcon = customSkinConfig()?.optJSONObject("play_icon") ?: return@hookAfter
@@ -153,6 +154,22 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                 buildPlayerIcon(playIcon)?.let { param.result = it }
             }
             log("Custom skin play icon hook installed: ${getter.declaringClass.name}.${getter.name}")
+        }
+        // 番剧 JSON 模型:getDragLeftPng/getDragRightPng/getMiddlePng 返回 URL 字符串,
+        // 直接替换返回值即可。
+        skinSymbols.videoPlayerIconGetters.forEach { getter ->
+            env.hookAfter(getter) { param ->
+                if (!ModuleSettings.isCustomSkinEnabled(prefs)) return@hookAfter
+                val playIcon = customSkinConfig()?.optJSONObject("play_icon") ?: return@hookAfter
+                val url = when (getter.name) {
+                    "getDragLeftPng" -> playIcon.optString("drag_left_png")
+                    "getDragRightPng" -> playIcon.optString("drag_right_png")
+                    "getMiddlePng" -> playIcon.optString("middle_png")
+                    else -> return@hookAfter
+                }
+                if (url.isNotBlank()) param.result = url
+            }
+            log("Custom skin video player icon hook installed: ${getter.declaringClass.name}.${getter.name}")
         }
     }
 
