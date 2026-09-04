@@ -1082,6 +1082,28 @@ object BiliSymbolResolver {
                 ?.apply { isAccessible = true }
         }.getOrNull()
 
+        // 诊断:B 站 blkv 相关方法的真实签名(9.10.0 可能改版,找出实际形态)。
+        fun sig(m: java.lang.reflect.Method) = "${m.declaringClass.name}.${m.name}(" +
+            m.parameterTypes.joinToString(",") { it.simpleName } + ")->" + m.returnType.simpleName
+        val blkvMethods = runCatching {
+            currentBridge.findMethod(
+                FindMethod.create().matcher(MethodMatcher.create().usingStrings(".blkv")),
+            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
+                .map(::sig).distinct().take(8)
+        }.getOrDefault(emptyList())
+        // 诊断:B 站读取下拉动画配置的调用点(含 "garb_load_equip_conf" 字符串的类)。
+        val loadEquipConfOwners = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("garb_load_equip_conf")),
+            ).map { it.name }.distinct().take(5)
+        }.getOrDefault(emptyList())
+        // 诊断:监听下拉动画变化广播的类(B 站原生接收器)。
+        val loadEquipChangeOwners = runCatching {
+            currentBridge.findClass(
+                FindClass.create().matcher(ClassMatcher.create().usingStrings("LOAD_EQUIP_CHANGE")),
+            ).map { it.name }.distinct().take(5)
+        }.getOrDefault(emptyList())
+
         // 诊断:B 站消费 load_equip / play_icon 字段的类(定位真实注入点)。
         val loadingUrlOwners = runCatching {
             currentBridge.findClass(
@@ -1113,6 +1135,9 @@ object BiliSymbolResolver {
                 ",configPlayerIcon=${configPlayerIconGetter != null}" +
                 ",videoPlayerIcon=${videoPlayerIconGetters.size}" +
                 ",blkvFactory=${blkvPrefsFactory != null}" +
+                ",blkvMethods=${blkvMethods.joinToString("|")}" +
+                ",confOwners=${loadEquipConfOwners.joinToString("|")}" +
+                ",changeOwners=${loadEquipChangeOwners.joinToString("|")}" +
                 ",loadingUrl=${loadingUrlOwners.joinToString("|")}" +
                 ",dragLeft=${dragLeftPngOwners.joinToString("|")}",
         )
