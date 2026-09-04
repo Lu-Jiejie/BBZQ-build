@@ -2001,21 +2001,15 @@ data class RestoredTripleSpeedSymbols(
 
 data class CustomSkinSymbols(
     val resolverMethod: MethodDescriptor,
-    // 皮肤响应模型符号:用于在 B 站解析 /x/resource/show/skin 时注入
-    // user_equip 与 load_equip(下拉刷新动画)。全部可选:
-    // 缺失时仅失去响应替换增强,皮肤文件应用与 resolver 替换依然工作。
+    // 皮肤响应注入(setUserGarb/setLoadEquip)与解析入口,缺失时降级为广播方案
     val skinResponseClassName: String? = null,
     val skinResponseUserGarbSetter: MethodDescriptor? = null,
     val skinResponseLoadEquipSetter: MethodDescriptor? = null,
     val skinResolveMethod: MethodDescriptor? = null,
-    // 播放页进度条图标(play_icon)的 URL getter(getDragLeftPng 等):
-    // 播放页 UI 从 PlayerIcon 模型读这三个 getter(左拉/右拉/不拉表现图)。
+    // 进度条图标(play_icon)三个 URL getter:左拉/右拉/不拉表现图
     val videoPlayerIconGetters: List<MethodDescriptor> = emptyList(),
-    // B 站 blkv 工厂方法(签名 Context,String,Z,I 返回 SharedPrefX):
-    // 反射调用它写入 garb_load_equip_conf,替代"写不了 B 站私有 blkv"的旧限制。可选。
+    // blkv 工厂(写下拉动画配置)与其读取出口 get(String,Object)(读取拦截)
     val blkvPrefsFactory: MethodDescriptor? = null,
-    // SharedPrefX 实现类的 get(String,Object) 方法:B 站所有 blkv 读取的最终出口,
-    // hook 后读取 garb_load_equip_conf 时强制返回自制 JSON,摆脱广播时序/跨进程缓存。可选。
     val blkvGetMethods: List<MethodDescriptor> = emptyList(),
     val evidence: String,
 ) {

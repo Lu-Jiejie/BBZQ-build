@@ -34,8 +34,7 @@ internal object CustomSkinApplier {
         registerThemeChangeObserver(env)
         val target = resolveTarget(env, config) ?: return
         if (isTargetApplied(target)) {
-            // 皮肤已应用过:load_equip 仍要幂等确保(文件缺失或未广播时补一次)。
-            // 放后台线程,避免主线程网络下载。
+            // 已应用过:load_equip 仍要幂等确保,放后台线程避免主线程下载
             if (!applyPending.compareAndSet(false, true)) return
             Thread {
                 try {
@@ -127,10 +126,7 @@ internal object CustomSkinApplier {
         }
     }
 
-    /**
-     * 幂等确保 load_equip 已应用:文件已存在则跳过下载,但总是广播
-     * LOAD_EQUIP_CHANGE,让 B 站 web 进程重读配置并加载动画。无 load_equip 时跳过。
-     */
+    // 幂等确保:文件已在则跳过下载,总是广播让 web 进程重读
     private fun ensureLoadEquipApplied(env: RoamingEnv, raw: String, target: SkinTarget) {
         if (!ModuleSettings.isCustomSkinEnabled(env.prefs)) return
         val root = runCatching { JSONObject(raw) }.getOrNull() ?: return
@@ -154,12 +150,7 @@ internal object CustomSkinApplier {
         env.log("Custom skin applied: id=${target.id} version=${target.version}")
     }
 
-    /**
-     * 下拉刷新动画(load_equip)适配:
-     * 与 BiliRoamingX 相同的约定——把 loading_url 下载到
-     * garb/load_equip/<base64(loading_url)> 供 B 站 web 进程加载,
-     * 再广播 LOAD_EQUIP_CHANGE 通知它重读。无 load_equip 时跳过。
-     */
+    // 下拉动画:loading_url 下载到 garb/load_equip/<base64(url)> 供 web 进程加载,再广播重读
     private fun applyLoadEquip(env: RoamingEnv, root: JSONObject, garbDir: File) {
         val loadEquip = root.optJSONObject("load_equip") ?: return
         val url = loadEquip.optString("loading_url")

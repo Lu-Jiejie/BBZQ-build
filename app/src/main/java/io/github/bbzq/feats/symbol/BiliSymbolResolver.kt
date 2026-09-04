@@ -1005,9 +1005,8 @@ object BiliSymbolResolver {
         }.getOrNull() ?: return SymbolScanResult.Missing("garb resolver method not found")
         resolverMethod.isAccessible = true
 
-        // 皮肤响应模型:含 setUserGarb / setLoadEquip setter 的类。
-        // load_equip(下拉刷新动画)与 user_equip 一样是皮肤响应的一部分,
-        // 在 B 站解析 /x/resource/show/skin 时注入,保证刷新后仍生效。
+        // 皮肤响应模型:含 setUserGarb / setLoadEquip setter,
+        // load_equip(下拉动画)与 user_equip 一起在解析 /x/resource/show/skin 时注入
         val skinResponseClass = runCatching {
             currentBridge.findClass(
                 FindClass.create().matcher(ClassMatcher.create().usingStrings("user_equip")),
@@ -1023,8 +1022,7 @@ object BiliSymbolResolver {
             it.name == "setLoadEquip" && it.parameterCount == 1
         }?.apply { isAccessible = true }
 
-        // 皮肤解析入口方法(宽松匹配):在 resolver 找不到时用于兜底判断,
-        // 与 scanCustomTheme 中的 skinResolveMethod 规则保持一致。
+        // 皮肤解析入口方法(宽松匹配,与 scanCustomTheme 的规则一致)
         val skinResolveMethod = runCatching {
             currentBridge.findMethod(
                 FindMethod.create().matcher(MethodMatcher.create().usingStrings("shouldApplyForceOpGarb =")),
@@ -1033,11 +1031,8 @@ object BiliSymbolResolver {
                 ?.apply { isAccessible = true }
         }.getOrNull()
 
-        // 播放页进度条图标(play_icon)的 URL getter:
-        // 播放页 UI 从 PlayerIcon 模型(getDragLeftPng/getDragRightPng/getMiddlePng)
-        // 读取左拉/右拉/不拉三种状态的表现图。用类名限定 PlayerIcon 精确命中
-        // protobuf PlayerIcon 与番剧 JSON 模型(VideoPlayerIcon_JsonDescriptor),
-        // 避免全 dex 方法名扫描误伤 Description 等无关类。可选增强。
+        // 进度条图标(play_icon)的三个 URL getter:类名限定 PlayerIcon,
+        // 命中 protobuf PlayerIcon 与番剧 JSON 模型,排除 Description 等无关类
         val videoPlayerIconGetters = runCatching {
             listOf("getDragLeftPng", "getDragRightPng", "getMiddlePng").flatMap { methodName ->
                 currentBridge.findMethod(
@@ -1053,9 +1048,7 @@ object BiliSymbolResolver {
                 .map { it.apply { isAccessible = true } }
         }.getOrDefault(emptyList())
 
-        // B 站 blkv 工厂方法:返回 SharedPrefX(自定义 blkv 接口,不是标准 SharedPreferences)。
-        // 反射调用它拿到 blkv 实例,直接写入 garb_load_equip_conf,复刻 B 站官方写入路径。
-        // 返回类型名只匹配 "Shared"(兼容 SharedPrefX / SharedPreferences),可选增强。
+        // blkv 工厂(返回 SharedPrefX,非标准 SharedPreferences):反射调用写入下拉动画配置
         val blkvPrefsFactory = runCatching {
             currentBridge.findMethod(
                 FindMethod.create().matcher(MethodMatcher.create().usingStrings(".blkv")),
@@ -1071,84 +1064,22 @@ object BiliSymbolResolver {
                 ?.apply { isAccessible = true }
         }.getOrNull()
 
-        // 诊断:B 站 blkv 相关方法的真实签名(9.10.0 可能改版,找出实际形态)。
-        fun sig(m: java.lang.reflect.Method) = "${m.declaringClass.name}.${m.name}(" +
-            m.parameterTypes.joinToString(",") { it.simpleName } + ")->" + m.returnType.simpleName
-        val blkvMethods = runCatching {
-            currentBridge.findMethod(
-                FindMethod.create().matcher(MethodMatcher.create().usingStrings(".blkv")),
-            ).mapNotNull { runCatching { it.getMethodInstance(classLoader) }.getOrNull() }
-                .map(::sig).distinct().take(8)
-        }.getOrDefault(emptyList())
-        // 诊断:blkv 接口(SharedPrefX)的方法清单,用于反射写入时选对方法。
-        val blkvApi = blkvPrefsFactory?.returnType?.let { clazz ->
-            runCatching { clazz.declaredMethods.map(::sig) }.getOrDefault(emptyList())
-        }?.take(12).orEmpty()
-
-        // B 站 blkv 读取的最终出口:SharedPrefX 接口的实现类的 get(String,Object) 方法。
-        // 任何进程/组件读 blkv 配置都经过它——hook 后在 key==garb_load_equip_conf 时
-        // 强制返回自制 load_equip JSON,彻底摆脱广播时序与跨进程缓存导致的"时好时坏"。
-        // addInterface 找实现类(与 controller 扫描同源),再逐个找 get 方法。可选增强。
+        // SharedPrefX 实现类的 get(String,Object):所有 blkv 读取的出口,
+        // hook 后读 garb_load_equip_conf 强制返回自制配置,摆脱广播/缓存竞态
         val blkvGetMethods = runCatching {
-            val implClasses = currentBridge.findClass(
+            currentBridge.findClass(
                 FindClass.create().matcher(ClassMatcher.create().addInterface("com.bilibili.lib.blkv.SharedPrefX")),
             ).mapNotNull { runCatching { classLoader.loadClassOrNull(it.name) }.getOrNull() }
-            implClasses.flatMap { clazz ->
-                clazz.declaredMethods.asSequence()
-                    .filter { method ->
-                        method.name == "get" && method.parameterCount == 2 &&
-                            method.parameterTypes[0] == String::class.java &&
-                            !method.parameterTypes[1].isPrimitive
-                    }
-                    .map { it.apply { isAccessible = true } }
-                    .toList()
-            }.distinctBy { "${it.declaringClass.name}.${it.name}" }
-        }.getOrDefault(emptyList())
-        // 诊断:B 站读取下拉动画配置的调用点(含 "garb_load_equip_conf" 字符串的类)。
-        val loadEquipConfOwners = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(ClassMatcher.create().usingStrings("garb_load_equip_conf")),
-            ).map { it.name }.distinct().take(5)
-        }.getOrDefault(emptyList())
-        // 诊断:监听下拉动画变化广播的类(B 站原生接收器)。
-        val loadEquipChangeOwners = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(ClassMatcher.create().usingStrings("LOAD_EQUIP_CHANGE")),
-            ).map { it.name }.distinct().take(5)
-        }.getOrDefault(emptyList())
-        // 诊断:load_equip 核心管理器(changeOwners/confOwners 双命中,如 ko1.j)的方法签名,
-        // 看它读取配置、加载动画的真实方法,供下轮 hook 其读取边界。
-        val loadEquipManagerMethods: List<String> = ArrayList<String>().apply {
-            for (owner in loadEquipChangeOwners) {
-                val clazz = classLoader.loadClassOrNull(owner) ?: continue
-                for (method in clazz.declaredMethods) add(sig(method))
-            }
-        }.distinct().take(15)
-        // 诊断:所有含 "load_equip" 字符串的类(评论区/自动刷新组件可能读别的 key 或文件)。
-        val loadEquipOwners = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(ClassMatcher.create().usingStrings("load_equip")),
-            ).map { it.name }.distinct().take(6)
-        }.getOrDefault(emptyList())
-        // 诊断:含 blkv 文件名(instance.bili_preference)的类,确认 B 站读取的文件名。
-        val blkvFileOwners = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(ClassMatcher.create().usingStrings("instance.bili_preference")),
-            ).map { it.name }.distinct().take(5)
-        }.getOrDefault(emptyList())
-
-        // 诊断:B 站消费 load_equip / play_icon 字段的类(定位真实注入点)。
-        val loadingUrlOwners = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(ClassMatcher.create().usingStrings("loading_url")),
-            ).mapNotNull { runCatching { classLoader.loadClassOrNull(it.name) }.getOrNull() }
-                .map { it.name }.distinct().take(3)
-        }.getOrDefault(emptyList())
-        val dragLeftPngOwners = runCatching {
-            currentBridge.findClass(
-                FindClass.create().matcher(ClassMatcher.create().usingStrings("drag_left_png")),
-            ).mapNotNull { runCatching { classLoader.loadClassOrNull(it.name) }.getOrNull() }
-                .map { it.name }.distinct().take(3)
+                .flatMap { clazz ->
+                    clazz.declaredMethods.asSequence()
+                        .filter { method ->
+                            method.name == "get" && method.parameterCount == 2 &&
+                                method.parameterTypes[0] == String::class.java &&
+                                !method.parameterTypes[1].isPrimitive
+                        }
+                        .map { it.apply { isAccessible = true } }
+                        .toList()
+                }.distinctBy { "${it.declaringClass.name}.${it.name}" }
         }.getOrDefault(emptyList())
 
         val symbols = CustomSkinSymbols(
@@ -1165,16 +1096,7 @@ object BiliSymbolResolver {
                 ",loadEquip=${skinResponseLoadEquipSetter != null}" +
                 ",videoPlayerIcon=${videoPlayerIconGetters.size}" +
                 ",blkvFactory=${blkvPrefsFactory != null}" +
-                ",blkvGets=${blkvGetMethods.size}" +
-                ",blkvApi=${blkvApi.joinToString("|")}" +
-                ",blkvMethods=${blkvMethods.joinToString("|")}" +
-                ",confOwners=${loadEquipConfOwners.joinToString("|")}" +
-                ",changeOwners=${loadEquipChangeOwners.joinToString("|")}" +
-                ",managerMethods=${loadEquipManagerMethods.joinToString("|")}" +
-                ",loadEquipOwners=${loadEquipOwners.joinToString("|")}" +
-                ",blkvFileOwners=${blkvFileOwners.joinToString("|")}" +
-                ",loadingUrl=${loadingUrlOwners.joinToString("|")}" +
-                ",dragLeft=${dragLeftPngOwners.joinToString("|")}",
+                ",blkvGets=${blkvGetMethods.size}",
         )
         return SymbolScanResult.Found(symbols, resolverMethod.declaringClass.name, symbols.evidence)
     }

@@ -31,7 +31,7 @@ import java.lang.reflect.Modifier
  * BiliRoaming while keeping all settings in BBZQ's remote preferences.
  */
 class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
-    // play_icon 配置缓存:以原始 JSON 字符串为指纹,皮肤切换时自动失效重解析
+    // play_icon 配置缓存:raw 指纹变化(皮肤切换)时重解析
     private var cachedSkinRaw: String? = null
     private var cachedPlayIconConfig: JSONObject? = null
 
@@ -47,9 +47,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
                 log("Custom skin resolver missing; using broadcast fallback")
             } else {
                 hookSkinResolver(skinSymbols.resolverMethod)
-                // 皮肤响应替换(load_equip / user_equip)与播放页图标(play_icon)注入:
-                // 使用独立的 customSkin 符号,不再依赖颜色主题扫描(customTheme),
-                // 这样即使颜色主题符号缺失,皮肤功能依然完整。
+                // 皮肤响应/进度条图标/下拉动画注入(customSkin 符号独立于 customTheme)
                 hookSkinResponse(skinSymbols)
                 hookPlayIcon(skinSymbols)
                 applyLoadEquipConf(skinSymbols)
@@ -135,13 +133,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         log("Custom skin response hook installed: ${userGarbSetter.declaringClass.name}")
     }
 
-    /**
-     * 播放页进度条拖动图标(play_icon)注入:
-     * 自制主题 JSON 的 drag_left_png / drag_right_png / middle_png
-     * 是进度条控件左拉、右拉、不拉三种状态的表现图。播放页 UI 从
-     * PlayerIcon 模型读这三个 getter(返回 URL 字符串),直接替换返回值即可。
-     * 可选增强。
-     */
+    // 进度条图标(play_icon)注入:直接替换 PlayerIcon 模型三个 URL getter 的返回值
     private fun hookPlayIcon(skinSymbols: RestoredCustomSkinSymbols) {
         if (skinSymbols.videoPlayerIconGetters.isEmpty()) {
             log("Custom skin play icon hook skipped: playerIcon getters missing")
@@ -163,7 +155,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         }
     }
 
-    /** 自制皮肤 play_icon 配置:按 raw 指纹缓存解析结果,皮肤切换时自动失效重解析。 */
+    /** play_icon 配置:按 raw 指纹缓存,皮肤切换时自动重解析 */
     private fun playIconConfig(): JSONObject? {
         val raw = ModuleSettings.getCustomSkinJson(prefs)
         if (raw.isBlank()) return null
@@ -174,14 +166,7 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         return cachedPlayIconConfig
     }
 
-    /**
-     * 下拉刷新动画(load_equip)配置写入:
-     * B 站 web 进程从 blkv 读 "garb_load_equip_conf" 才知道动画文件名(base64(loading_url))。
-     * 反射调用 B 站 blkv 工厂方法(签名 Context,String,Z,I,返回 SharedPrefX——
-     * B 站自定义 blkv 接口,非标准 SharedPreferences)拿到实例后写入,
-     * 复刻 BiliRoamingX 的写入路径,替代"写不了 B 站私有 blkv 格式"的旧限制。
-     * 最后广播 LOAD_EQUIP_CHANGE 让 web 进程重读。可选增强。
-     */
+    // 下拉动画配置写入 blkv(web 进程读它才知道动画文件名),再广播让其重读
     private fun applyLoadEquipConf(skinSymbols: RestoredCustomSkinSymbols) {
         val factory = skinSymbols.blkvPrefsFactory ?: run {
             log("Custom skin load equip conf skipped: blkv factory missing")
@@ -197,13 +182,13 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             return
         }
         runCatching {
-            // 工厂是静态方法:BiliRoamingX 用 invoke-static 调用,传 null 接收者
+            // 工厂是静态方法,传 null 接收者
             val prefs = factory.invoke(null, env.hostContext, LOAD_EQUIP_CONF_PREFS_FILE, false, 0) ?: return@runCatching
             if (!writeBlkv(prefs, LOAD_EQUIP_CONF_KEY, loadEquip.toString())) {
                 log("Custom skin load equip conf write failed: no putString api on ${prefs.javaClass.name}")
                 return@runCatching
             }
-            // 先写 blkv 再广播,web 进程收到广播后重读才能拿到新配置(与 BiliRoamingX 顺序一致)
+            // 先写再广播,web 进程收到广播后重读才能拿到新配置
             env.hostContext.sendBroadcast(Intent("${env.packageName}.garb.LOAD_EQUIP_CHANGE"))
             log("Custom skin load equip conf written: id=${loadEquip.optLong("id")} via ${factory.declaringClass.name}.${factory.name}")
         }.onFailure {
@@ -211,13 +196,8 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         }
     }
 
-    /**
-     * 通过反射向 B 站 blkv 写入一个 key:优先标准 SharedPreferences
-     * (edit().putString().apply()),失败则适配 B 站自定义 SharedPrefX 接口
-     * (可能直接有 putString,或 editor 独立提交)。逐级降级尝试。
-     */
+    // 反射写 blkv:优先标准 SharedPreferences 路径,失败逐级降级适配 B 站 SharedPrefX
     private fun writeBlkv(prefs: Any, key: String, value: String): Boolean {
-        // 1) 标准路径:edit() -> putString -> apply()/commit()
         runCatching {
             val editor = prefs.javaClass.getMethod("edit").invoke(prefs) ?: return@runCatching
             editor.javaClass.getMethod("putString", String::class.java, String::class.java)
@@ -225,14 +205,12 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             commitIfPresent(editor)
             return true
         }
-        // 2) 对象直接写:putString() -> apply()/commit()
         runCatching {
             prefs.javaClass.getMethod("putString", String::class.java, String::class.java)
                 .invoke(prefs, key, value)
             commitIfPresent(prefs)
             return true
         }
-        // 3) 按方法名模糊找 editor 型方法(如 editString/editor)
         runCatching {
             val editMethod = prefs.javaClass.methods.firstOrNull { m ->
                 m.parameterCount == 0 && m.returnType.name.contains("Editor")
@@ -253,11 +231,8 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
             .getOrElse { runCatching { editor.javaClass.getMethod("commit").invoke(editor) } }
     }
 
-    /**
-     * 读取边界拦截:B 站所有 blkv 读取都经过 SharedPrefX 实现类的 get(String,Object)。
-     * hook 后,任何进程/组件读 garb_load_equip_conf 都强制返回自制 load_equip JSON,
-     * 摆脱广播时序与跨进程缓存导致的"时好时坏"。可选增强。
-     */
+    // 读取边界拦截:所有 blkv 读取经过 SharedPrefX.get,读下拉配置时强制返回自制 JSON,
+    // 摆脱广播时序/跨进程缓存导致的时好时坏
     private fun hookBlkvGet(skinSymbols: RestoredCustomSkinSymbols) {
         if (skinSymbols.blkvGetMethods.isEmpty()) {
             log("Custom skin blkv get hook skipped: SharedPrefX get methods missing")
@@ -322,15 +297,11 @@ class CustomThemeHook(env: RoamingEnv) : BaseRoamingHook(env) {
         log("CustomTheme web colors installed: ${formatColor(color)}")
     }
 
-    /**
-     * 下拉刷新动画(load_equip)由 web 进程渲染,该进程不跑完整皮肤流程,
-     * 这里单独确保 blkv 配置已写入,让 web 进程也能拿到自制 load_equip。
-     */
+    // 下拉动画由 web 进程渲染,该进程不跑完整皮肤流程,单独补写配置并装读取拦截
     fun insertLoadEquipForWebProcess() {
         if (!ModuleSettings.isCustomSkinEnabled(prefs)) return
         val skinSymbols = env.symbols?.customSkin?.restore(classLoader) ?: return
         applyLoadEquipConf(skinSymbols)
-        // web 进程是渲染列表/评论区的地方,读取边界拦截在这里同样必需
         hookBlkvGet(skinSymbols)
     }
 
